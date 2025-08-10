@@ -1,0 +1,13 @@
+[package]
+name = "motor-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+amber-aios = { git = "https://github.com/w-utter/amber-aios-rust"}
+eframe = "0.31"
+egui = "0.31"
+egui_plot = "0.32"
+io-uring = { git = "https://github.com/tokio-rs/io-uring"}
+duration-string = "0.5.2"
+libc = "0.2"
