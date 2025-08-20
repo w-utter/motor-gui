@@ -14,14 +14,30 @@ fn main() -> eframe::Result {
     )
 }
 
+use motor_backend::fourier::{FourierCmd, FourierResponse};
+
 struct AppState {
-    motors: Vec<MotorUiConfig>
+    motors: Vec<MotorUiConfig>,
+    fourier: std::thread::JoinHandle<()>,
+    fourier_tx: std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>,
+    fourier_rx: std::sync::mpsc::Receiver<(Ipv4Addr, FourierResponse)>,
 }
 
 impl AppState {
     fn new() -> Self {
+        let (fourier_tx, thread_rx) = std::sync::mpsc::channel();
+        let (thread_tx, fourier_rx) = std::sync::mpsc::channel();
+
+        let fourier_handle = std::thread::spawn(|| {
+            let res = motor_backend::fourier::event_loop(thread_rx, thread_tx);
+            panic!("handle exited with {res:?}");
+        });
+
         AppState {
             motors: vec![],
+            fourier: fourier_handle,
+            fourier_tx,
+            fourier_rx,
         }
     }
 }
@@ -39,6 +55,8 @@ struct MotorUiConfig {
     input: MotorInput,
     input_cache: MotorInputCache,
     running: bool,
+    start_instant: std::time::Instant,
+    output: Vec<(motor_ctx::CVP, std::time::Instant)>,
 }
 
 struct ControlStateCache(u8);
@@ -143,13 +161,15 @@ impl MotorUiConfig {
             input_cache: MotorInputCache::default(),
 
             running: false,
+            output: vec![],
+            start_instant: std::time::Instant::now(),
         }
     }
 
-    fn display(&mut self, ui: &mut egui::Ui) {
+    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ui: &mut egui::Ui) {
         let mut changed = false;
         changed |= self.control_state.display(&mut self.control_state_cache, ui);
-        changed |= self.backend.display(ui);
+        changed |= self.backend.display(fourier_tx, &self.control_state, ui);
         ui.horizontal(|ui| {
             ui.label("gear reduction: ");
             if ui.text_edit_singleline(&mut self.gear_reduction_storage).changed() {
@@ -157,7 +177,6 @@ impl MotorUiConfig {
                     Ok(new_gear_reduction) if new_gear_reduction != self.gear_reduction => {
                         self.gear_reduction = new_gear_reduction;
                         changed = true;
-                        //TODO propagate changes to driver
                     }
                     _ => (),
                 }
@@ -167,9 +186,46 @@ impl MotorUiConfig {
 
         changed |= self.input.display_options(&mut self.input_cache, ui);
 
-        if changed {
-            // propagate changes to driver
-        }
+        ui.vertical(|ui| {
+            match &self.backend {
+                MotorUiBackendConfig::Fourier(config) => {
+                    if let Some(ip) = config.ip_addr() {
+                        if ui.button("send to motor").clicked() {
+                            //TODO: the motor needs to be setup (added to the ctx)
+                            //this can be done with another button
+                            //^^ or this can can be done when its changed
+                            fourier_tx.send((ip, FourierCmd::SetWaveForm(self.input.clone())));
+                        }
+                    }
+                }
+                _ => (),
+            }
+        });
+
+
+        self.display_output_graph(ui)
+
+
+    }
+
+    fn display_output_graph(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            use egui_plot::{PlotPoint, PlotPoints, Line};
+
+            let points = self.output.iter().map(|(cvp, time)| {
+                PlotPoint::new((time.duration_since(self.start_instant)).as_secs_f64(), cvp.velocity)
+            }).collect::<Vec<_>>();
+
+            egui_plot::Plot::new("output")
+                .show(ui, |plot| {
+                    plot.line(Line::new("vel", PlotPoints::Owned(points)));
+                });
+
+            if ui.button("reset start time").clicked() {
+                self.start_instant = std::time::Instant::now();
+                self.output.clear();
+            }
+        });
     }
 }
 
@@ -183,7 +239,7 @@ enum MotorUiBackendConfig {
 }
 
 impl MotorUiBackendConfig {
-    fn display(&mut self, ui: &mut egui::Ui) -> bool {
+    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, control_state: &ControlState, ui: &mut egui::Ui) -> bool {
         ui.horizontal(|ui| {
             if !matches!(self, Self::None) && ui.add(egui::Button::new("clear config")).clicked() {
                 *self = Self::None;
@@ -195,7 +251,24 @@ impl MotorUiBackendConfig {
 
         match self {
             Self::Fourier(config) => {
-                config.display(ui)
+                let changed = config.display(ui);
+
+                if let Some(addr) = &config.ip {
+                    if config.added {
+                        if ui.button("remove").clicked() {
+                            fourier_tx.send((*addr, FourierCmd::Remove));
+                        }
+                    } else {
+                        if ui.button("add").clicked() {
+                            fourier_tx.send((*addr, FourierCmd::Add(config.encoding, None, crate::motor_ctx::MotorConfig {
+                                gear_reduction: 1.,
+                                controller: None,
+                                state: control_state.clone(),
+                            })));
+                        }
+                    }
+                }
+                changed
             }
             _ => false,
         }
@@ -204,12 +277,14 @@ impl MotorUiBackendConfig {
 
 use std::time::Duration;
 
+#[derive(Clone, Debug)]
 struct StepInput {
     delay: Duration,
     magnitude: f64,
     on_dur: Duration,
 }
 
+#[derive(Clone, Debug)]
 struct ImpulseInput {
     magnitude: f64,
     delay: Duration,
@@ -253,6 +328,7 @@ struct MotorInputCache {
     custom: Vec<(f64, Duration)>,
 }
 
+#[derive(Clone, Debug)]
 enum MotorInput {
     Idle,
     Constant(f64),
@@ -392,8 +468,7 @@ impl MotorInput {
             }
             _ => (),
         }
-
-        self.display_prelim_graph(ui);
+        //self.display_prelim_graph(ui);
 
         changed
     }
@@ -467,13 +542,31 @@ impl MotorInput {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        ctx.request_repaint();
         egui::TopBottomPanel::top("top pannel").show(ctx, |ui| {
             if ui.button("add motor").clicked() {
                 self.motors.push(MotorUiConfig::new())
             }
 
+            while let Ok((rx_ip, msg)) = self.fourier_rx.try_recv() {
+
+                if let Some(motor) = self.motors.iter_mut().find(|m| {
+                    match m.backend {
+                        MotorUiBackendConfig::Fourier(motor_backend::fourier::MotorUiConfig {ip, ..}) => ip == Some(rx_ip),
+                        _ => false,
+                    }
+                }) {
+                    match msg {
+                        FourierResponse::OutputCVP(cvp, time) => motor.output.push((cvp, time)),
+                        msg => println!("received from fourier: {msg:?}"),
+                    }
+                } else {
+                    println!("received from fourier: {msg:?}");
+                }
+            }
+
             for motor in &mut self.motors {
-                motor.display(ui)
+                motor.display(&self.fourier_tx, ui)
             }
         });
     }

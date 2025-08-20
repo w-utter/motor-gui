@@ -21,7 +21,7 @@ impl<const R: usize, const W: usize> AsRawFd for MotorCtx<R, W> {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ControlState {
     Position {
         show_velocity: bool,
@@ -37,13 +37,14 @@ pub enum ControlState {
     },
 }
 
+#[derive(Debug)]
 pub struct MotorConfig {
     pub gear_reduction: f64,
     pub controller: Option<Controller>,
     pub state: ControlState,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct CVP {
     pub current: f64,
     pub position: f64,

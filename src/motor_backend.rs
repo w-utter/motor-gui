@@ -31,6 +31,7 @@ pub enum MotorBackendParseError {
     Fourier(amber_aios::Err),
 }
 
+/*
 impl<const R: usize, const W: usize> MotorBackend<R, W> {
     pub fn connection(&self) -> MotorBackendConnection {
         match self {
@@ -67,6 +68,7 @@ impl<const R: usize, const W: usize> MotorBackend<R, W> {
         }
     }
 }
+*/
 
 pub(crate) enum MotorBackendIoPrep {
     Fourier(FourierSendRecv),

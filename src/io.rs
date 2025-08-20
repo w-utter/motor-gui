@@ -7,6 +7,7 @@ pub struct IoCtx<const R: usize, const W: usize> {
     io_uring: IoUringCtx<R, W>,
 }
 
+/*
 impl <const R: usize, const W: usize> IoCtx<R, W> {
     pub fn new(entries: u32) -> Result<Self, std::io::Error> {
         let io_uring = IoUringCtx::new(entries)?;
@@ -56,3 +57,4 @@ impl <const R: usize, const W: usize> IoCtx<R, W> {
         self.io_uring.step()
     }
 }
+*/
