@@ -1,6 +1,4 @@
 mod controller;
-mod io;
-mod io_uring;
 mod motor_backend;
 mod motor_ctx;
 
@@ -8,17 +6,17 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "",
         Default::default(),
-        Box::new(|cc| {
+        Box::new(|_cc| {
             Ok(Box::new(AppState::new()))
         })
     )
 }
 
-use motor_backend::fourier::{FourierCmd, FourierResponse};
+pub use motor_backend::fourier::{FourierCmd, FourierResponse};
 
 struct AppState {
     motors: Vec<MotorUiConfig>,
-    fourier: std::thread::JoinHandle<()>,
+    _fourier: std::thread::JoinHandle<std::io::Result<()>>,
     fourier_tx: std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>,
     fourier_rx: std::sync::mpsc::Receiver<(Ipv4Addr, FourierResponse)>,
 }
@@ -29,13 +27,12 @@ impl AppState {
         let (thread_tx, fourier_rx) = std::sync::mpsc::channel();
 
         let fourier_handle = std::thread::spawn(|| {
-            let res = motor_backend::fourier::event_loop(thread_rx, thread_tx);
-            panic!("handle exited with {res:?}");
+            motor_backend::fourier::event_loop(thread_rx, thread_tx)
         });
 
         AppState {
             motors: vec![],
-            fourier: fourier_handle,
+            _fourier: fourier_handle,
             fourier_tx,
             fourier_rx,
         }
@@ -43,7 +40,7 @@ impl AppState {
 }
 
 use motor_ctx::ControlState;
-use std::net::{Ipv4Addr, IpAddr};
+use std::net::Ipv4Addr;
 
 struct MotorUiConfig {
     backend: MotorUiBackendConfig,
@@ -54,9 +51,8 @@ struct MotorUiConfig {
 
     input: MotorInput,
     input_cache: MotorInputCache,
-    running: bool,
-    start_instant: std::time::Instant,
     output: Vec<(motor_ctx::CVP, std::time::Instant)>,
+    ignore_motor_output: bool,
 }
 
 struct ControlStateCache(u8);
@@ -160,13 +156,12 @@ impl MotorUiConfig {
             input: MotorInput::Idle,
             input_cache: MotorInputCache::default(),
 
-            running: false,
             output: vec![],
-            start_instant: std::time::Instant::now(),
+            ignore_motor_output: false,
         }
     }
 
-    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ui: &mut egui::Ui) {
+    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut changed = false;
         changed |= self.control_state.display(&mut self.control_state_cache, ui);
         changed |= self.backend.display(fourier_tx, &self.control_state, ui);
@@ -184,17 +179,22 @@ impl MotorUiConfig {
             ui.label(format!("current gear reduction: {}", self.gear_reduction));
         });
 
-        changed |= self.input.display_options(&mut self.input_cache, ui);
+        changed |= self.input.display_options(&mut self.input_cache, ui, ctx);
+        let _changed = changed;
 
         ui.vertical(|ui| {
             match &self.backend {
                 MotorUiBackendConfig::Fourier(config) => {
                     if let Some(ip) = config.ip_addr() {
                         if ui.button("send to motor").clicked() {
-                            //TODO: the motor needs to be setup (added to the ctx)
-                            //this can be done with another button
-                            //^^ or this can can be done when its changed
-                            fourier_tx.send((ip, FourierCmd::SetWaveForm(self.input.clone())));
+                            self.output.clear();
+                            self.ignore_motor_output = false;
+                            let _ = fourier_tx.send((ip, FourierCmd::SetWaveForm(self.input.clone())));
+                        }
+
+                        if ui.button("stop").clicked() {
+                            self.ignore_motor_output = true;
+                            let _ = fourier_tx.send((ip, FourierCmd::StopWaveform));
                         }
                     }
                 }
@@ -202,30 +202,128 @@ impl MotorUiConfig {
             }
         });
 
-
-        self.display_output_graph(ui)
-
-
+        self.display_output_graph(ui, ctx)
     }
 
-    fn display_output_graph(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            use egui_plot::{PlotPoint, PlotPoints, Line};
+    fn display_output_graph(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let first_time = self.output.first().map(|(_, time)| *time).unwrap_or(std::time::Instant::now());
 
-            let points = self.output.iter().map(|(cvp, time)| {
-                PlotPoint::new((time.duration_since(self.start_instant)).as_secs_f64(), cvp.velocity)
-            }).collect::<Vec<_>>();
+        let contents = vec![];
+        let mut writer = csv::Writer::from_writer(contents);
 
-            egui_plot::Plot::new("output")
-                .show(ui, |plot| {
-                    plot.line(Line::new("vel", PlotPoints::Owned(points)));
-                });
+        egui::Window::new("output window").show(ctx, |ui| {
+            ui.vertical(|ui| {
+                use egui_plot::{PlotPoint, PlotPoints, Line};
 
-            if ui.button("reset start time").clicked() {
-                self.start_instant = std::time::Instant::now();
-                self.output.clear();
-            }
+                let main_points = self.output.iter().map(|(cvp, time)| {
+                    let time = time.duration_since(first_time).as_secs_f64();
+
+                    PlotPoint::new(time, cvp.velocity)
+                }).collect::<Vec<_>>();
+
+                if ui.button("save as CSV").clicked() {
+                    for PlotPoint { x, y } in &main_points {
+                        writer.write_record(&[format!("{x}"), format!("{y}")]).unwrap();
+                    }
+
+
+                    let time = chrono::Utc::now().to_rfc3339();
+                    if let Ok(mut file) = std::fs::File::create(format!("{}/velocity-graph-{time}.csv", std::env::home_dir().unwrap_or(std::path::PathBuf::from("/")).display())) {
+                        let mut buf = writer.into_inner().unwrap();
+                        use std::io::Write;
+                        file.write(&buf).unwrap();
+                        buf.clear();
+                    }
+                }
+
+                egui_plot::Plot::new("output")
+                    .show(ui, |plot| {
+                        plot.line(Line::new("vel", PlotPoints::Owned(main_points)));
+                    });
+            });
         });
+
+        let contents = vec![];
+        let mut writer = csv::Writer::from_writer(contents);
+
+        if matches!(self.control_state, ControlState::Velocity {show_position: true, .. }) {
+            egui::Window::new("output window pos").show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    use egui_plot::{PlotPoint, PlotPoints, Line};
+
+                    let sub_points_1 = self.output.iter().map(|(cvp, time)| {
+                        let time = time.duration_since(first_time).as_secs_f64();
+
+                        PlotPoint::new(time, cvp.position)
+                    }).collect::<Vec<_>>();
+
+
+                    if ui.button("save as CSV").clicked() {
+                        for PlotPoint { x, y } in &sub_points_1 {
+                            (&mut writer).write_record(&[format!("{x}"), format!("{y}")]).unwrap();
+                        }
+
+                        let time = chrono::Utc::now().to_rfc3339();
+                        if let Ok(mut file) = std::fs::File::create(format!("position-graph-{time}.csv")) {
+                            let mut buf = writer.into_inner().unwrap();
+                            use std::io::Write;
+                            file.write(&buf).unwrap();
+                            buf.clear();
+                        }
+                    }
+
+                    egui_plot::Plot::new("output")
+                        .show(ui, |plot| {
+                            plot.line(Line::new("pos", PlotPoints::Owned(sub_points_1)));
+                        })
+                })
+            });
+        }
+
+        let contents = vec![];
+        let mut writer = csv::Writer::from_writer(contents);
+
+        if matches!(self.control_state, ControlState::Velocity {show_torque: true, .. }) {
+            egui::Window::new("output window current").show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    use egui_plot::{PlotPoint, PlotPoints, Line};
+
+                    let sub_points_2 = self.output.iter().map(|(cvp, time)| {
+                        let time = time.duration_since(first_time).as_secs_f64();
+
+                        PlotPoint::new(time, cvp.current)
+                    }).collect::<Vec<_>>();
+
+
+                    if ui.button("save as CSV").clicked() {
+                        for PlotPoint { x, y } in &sub_points_2 {
+                            writer.write_record(&[format!("{x}"), format!("{y}")]).unwrap();
+                        }
+
+                        let time = chrono::Utc::now().to_rfc3339();
+                        if let Ok(mut file) = std::fs::File::create(format!("current-graph-{time}.csv")) {
+                            let mut buf = writer.into_inner().unwrap();
+                            use std::io::Write;
+                            file.write(&buf).unwrap();
+                            buf.clear();
+                        }
+                    }
+
+                    egui_plot::Plot::new("output")
+                        .show(ui, |plot| {
+                            plot.line(Line::new("current", PlotPoints::Owned(sub_points_2)));
+                        })
+                })
+            });
+        }
+
+
+
+        if ui.button("reset start time").clicked() {
+            //self.start_instant = std::time::Instant::now();
+            self.output.clear();
+        }
+
     }
 }
 
@@ -256,11 +354,11 @@ impl MotorUiBackendConfig {
                 if let Some(addr) = &config.ip {
                     if config.added {
                         if ui.button("remove").clicked() {
-                            fourier_tx.send((*addr, FourierCmd::Remove));
+                            let _ = fourier_tx.send((*addr, FourierCmd::Remove));
                         }
                     } else {
                         if ui.button("add").clicked() {
-                            fourier_tx.send((*addr, FourierCmd::Add(config.encoding, None, crate::motor_ctx::MotorConfig {
+                            let _ = fourier_tx.send((*addr, FourierCmd::Add(config.encoding, None, crate::motor_ctx::MotorConfig {
                                 gear_reduction: 1.,
                                 controller: None,
                                 state: control_state.clone(),
@@ -278,14 +376,14 @@ impl MotorUiBackendConfig {
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
-struct StepInput {
+pub struct StepInput {
     delay: Duration,
     magnitude: f64,
     on_dur: Duration,
 }
 
 #[derive(Clone, Debug)]
-struct ImpulseInput {
+pub struct ImpulseInput {
     magnitude: f64,
     delay: Duration,
 }
@@ -322,14 +420,11 @@ struct MotorInputCache {
     imp_delay_storage: String,
     imp_mag_storage: String,
     impulse: Option<ImpulseInput>,
-
-    custom_delay_storage: String,
-    custom_mag_storage: String,
     custom: Vec<(f64, Duration)>,
 }
 
 #[derive(Clone, Debug)]
-enum MotorInput {
+pub enum MotorInput {
     Idle,
     Constant(f64),
     Step(StepInput),
@@ -338,7 +433,7 @@ enum MotorInput {
 }
 
 impl MotorInput {
-    fn display_options(&mut self, cache: &mut MotorInputCache, ui: &mut egui::Ui) -> bool {
+    fn display_options(&mut self, cache: &mut MotorInputCache, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
         let mut changed = false;
         if ui.add(egui::RadioButton::new(matches!(self, Self::Idle), "idle")).clicked() {
             self.move_prev_input(Self::Idle, cache);
@@ -468,13 +563,17 @@ impl MotorInput {
             }
             _ => (),
         }
-        //self.display_prelim_graph(ui);
+        self.display_prelim_graph(ctx);
 
         changed
     }
 
-    fn display_prelim_graph(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
+    fn display_prelim_graph(&mut self, ctx: &egui::Context) {
+        if matches!(self, Self::Idle) {
+            return;
+        }
+
+        egui::Window::new("input window").show(ctx, |ui| {
             use egui_plot::{PlotPoint, PlotPoints, Line};
             match self {
                 Self::Constant(c) => {
@@ -541,7 +640,7 @@ impl MotorInput {
 }
 
 impl eframe::App for AppState {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
         egui::TopBottomPanel::top("top pannel").show(ctx, |ui| {
             if ui.button("add motor").clicked() {
@@ -557,7 +656,20 @@ impl eframe::App for AppState {
                     }
                 }) {
                     match msg {
-                        FourierResponse::OutputCVP(cvp, time) => motor.output.push((cvp, time)),
+                        FourierResponse::OutputCVP(cvp, time) => {
+                            if !motor.ignore_motor_output {
+                                motor.output.push((cvp, time));
+                            }
+                        }
+                        FourierResponse::ControllerAdjustedCVP(_cvp, _time) => {
+
+                        }
+                        FourierResponse::EndWaveform => {
+                            motor.ignore_motor_output = true;
+                        }
+                        FourierResponse::Error(io) => {
+                            println!("io error: {io}");
+                        }
                         msg => println!("received from fourier: {msg:?}"),
                     }
                 } else {
@@ -566,7 +678,7 @@ impl eframe::App for AppState {
             }
 
             for motor in &mut self.motors {
-                motor.display(&self.fourier_tx, ui)
+                motor.display(&self.fourier_tx, ui, ctx)
             }
         });
     }

@@ -1,4 +1,3 @@
-use std::time::Duration;
 use crate::motor_ctx;
 
 //TODO: add cache for controllers in the config
@@ -6,15 +5,7 @@ use crate::motor_ctx;
 pub enum Controller {}
 
 impl Controller {
-    pub fn update(&mut self, input: motor_ctx::CVP, output: motor_ctx::CVP, control_state: &motor_ctx::ControlState) -> motor_ctx::CVP {
-        todo!()
-    }
-}
-
-pub enum ControllerState {}
-
-impl ControllerState {
-    pub fn update(&mut self, input: motor_ctx::CVP, output: motor_ctx::CVP, control_state: &motor_ctx::ControlState) -> motor_ctx::CVP {
+    pub fn update(&mut self, _input: motor_ctx::CVP, _output: motor_ctx::CVP, _control_state: &motor_ctx::ControlState) -> motor_ctx::CVP {
         todo!()
     }
 }
