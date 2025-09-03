@@ -1,4 +1,26 @@
 use crate::controller::{Controller};
+// Filter configuration for each motor. Uses the library crate's filter types.
+// This keeps UI/backend integration straightforward.
+#[derive(Clone, Debug)]
+pub struct FilterConfig {
+    pub enabled: bool,
+    pub velocity: bool,
+    pub position: bool,
+    pub current: bool,
+    pub filter: motor_gui::filter::FilterType,
+}
+
+impl Default for FilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            velocity: true,
+            position: false,
+            current: false,
+            filter: motor_gui::filter::FilterType::ExponentialMA { alpha: 0.2 },
+        }
+    }
+}
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ControlState {
