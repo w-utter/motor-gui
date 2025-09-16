@@ -13,12 +13,23 @@ fn main() -> eframe::Result {
 }
 
 pub use motor_backend::fourier::{FourierCmd, FourierResponse};
+pub use motor_backend::ds402::{Ds402Cmd, Ds402Response};
 
 struct AppState {
     motors: Vec<MotorUiConfig>,
     _fourier: std::thread::JoinHandle<std::io::Result<()>>,
     fourier_tx: std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>,
     fourier_rx: std::sync::mpsc::Receiver<(Ipv4Addr, FourierResponse)>,
+
+    network_ifs: sysinfo::Networks,
+    ecat: Option<ChosenEcatNetwork>,
+}
+
+struct ChosenEcatNetwork {
+    network_itf: String,
+    driver: std::thread::JoinHandle<()>,
+    ds402_tx: std::sync::mpsc::Sender<(usize, Ds402Cmd)>,
+    ds402_rx: std::sync::mpsc::Receiver<(usize, Ds402Response)>,
 }
 
 impl AppState {
@@ -35,6 +46,8 @@ impl AppState {
             _fourier: fourier_handle,
             fourier_tx,
             fourier_rx,
+            network_ifs: sysinfo::Networks::new(),
+            ecat: None,
         }
     }
 }
@@ -161,10 +174,10 @@ impl MotorUiConfig {
         }
     }
 
-    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut changed = false;
         changed |= self.control_state.display(&mut self.control_state_cache, ui);
-        changed |= self.backend.display(fourier_tx, &self.control_state, ui);
+        changed |= self.backend.display(fourier_tx, ds402_tx, &self.control_state, ui);
         ui.horizontal(|ui| {
             ui.label("gear reduction: ");
             if ui.text_edit_singleline(&mut self.gear_reduction_storage).changed() {
@@ -195,6 +208,20 @@ impl MotorUiConfig {
                         if ui.button("stop").clicked() {
                             self.ignore_motor_output = true;
                             let _ = fourier_tx.send((ip, FourierCmd::StopWaveform));
+                        }
+                    }
+                }
+                MotorUiBackendConfig::Ds402(config) => {
+                    if let (Some(tx), Some(idx)) = (ds402_tx, config.idx) {
+                        if ui.button("send to motor").clicked() {
+                            self.output.clear();
+                            self.ignore_motor_output = false;
+                            let _ = tx.send((idx, Ds402Cmd::SetWaveForm(self.input.clone())));
+                        }
+
+                        if ui.button("stop").clicked() {
+                            self.ignore_motor_output = true;
+                            let _ = tx.send((idx, Ds402Cmd::StopWaveform));
                         }
                     }
                 }
@@ -334,16 +361,20 @@ enum MotorUiBackendConfig {
     #[default]
     None,
     Fourier( motor_backend::fourier::MotorUiConfig),
+    Ds402(motor_backend::ds402::MotorUiConfig),
 }
 
 impl MotorUiBackendConfig {
-    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, control_state: &ControlState, ui: &mut egui::Ui) -> bool {
+    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>, control_state: &ControlState, ui: &mut egui::Ui) -> bool {
         ui.horizontal(|ui| {
             if !matches!(self, Self::None) && ui.add(egui::Button::new("clear config")).clicked() {
                 *self = Self::None;
             }
             if ui.add(egui::RadioButton::new(matches!(self, Self::Fourier(_)), "Fourier")).clicked() {
                 *self = Self::Fourier(Default::default());
+            }
+            if ui.add(egui::RadioButton::new(matches!(self, Self::Ds402(_)), "ds402 (ethercat)")).clicked() {
+                *self = Self::Ds402(Default::default());
             }
         });
 
@@ -355,6 +386,7 @@ impl MotorUiBackendConfig {
                     if config.added {
                         if ui.button("remove").clicked() {
                             let _ = fourier_tx.send((*addr, FourierCmd::Remove));
+                            config.added = false;
                         }
                     } else {
                         if ui.button("add").clicked() {
@@ -363,10 +395,42 @@ impl MotorUiBackendConfig {
                                 controller: None,
                                 state: control_state.clone(),
                             })));
+                            config.added = true;
                         }
                     }
                 }
                 changed
+            }
+            Self::Ds402(config) => {
+
+                match ds402_tx {
+                    Some(tx) => {
+                        let changed = config.display(ui);
+
+                        if let Some(idx) = config.idx {
+                            if config.added {
+                                if ui.button("remove").clicked() {
+                                    let _ = tx.send((idx, Ds402Cmd::Remove));
+                                    config.added = false;
+                                }
+                            } else {
+                                if ui.button("add").clicked() {
+                                    let _ = tx.send((idx, Ds402Cmd::Add(crate::motor_ctx::MotorConfig {
+                                        gear_reduction: 1.,
+                                        controller: None,
+                                        state: control_state.clone(),
+                                    })));
+                                    config.added = true;
+                                }
+                            }
+                        }
+                        changed
+                    }
+                    None => {
+                        ui.label("select a network interface for ethercat");
+                        false
+                    }
+                }
             }
             _ => false,
         }
@@ -581,9 +645,21 @@ impl MotorInput {
                     let pp2 = PlotPoint::new(100., *c);
                     let points = [pp1, pp2];
 
+                    let min = if *c * 2. < 0. {
+                        *c * 2.
+                    } else {
+                        0.
+                    };
+
+                    let max = if *c * 2. > 0. {
+                        *c * 2.
+                    } else {
+                        0.
+                    };
+
                     egui_plot::Plot::new("prelim")
                         .default_x_bounds(0., 10.)
-                        .default_y_bounds(0., *c * 2.)
+                        .default_y_bounds(min, max)
                         .show(ui, |plot| {
                             plot.line(Line::new("const", PlotPoints::Borrowed(&points)));
                         });
@@ -643,12 +719,43 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
         egui::TopBottomPanel::top("top pannel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.menu_button("ecat interface", |ui| {
+                    self.network_ifs.refresh(true);
+
+                    for (interface_name, network) in &self.network_ifs {
+                        if ui.button(format!("[{interface_name}]")).clicked() {
+                            match &self.ecat {
+                                Some(ChosenEcatNetwork { network_itf, .. }) if network_itf == interface_name => (),
+                                Some(ChosenEcatNetwork { ds402_tx, .. }) => {
+                                }
+                                None => {
+                                    let (main_tx, thread_rx) = std::sync::mpsc::channel();
+                                    let (thread_tx, main_rx) = std::sync::mpsc::channel();
+
+                                    let ifname = interface_name.to_owned();
+                                    let handle = std::thread::spawn(|| {
+                                        motor_backend::ds402::event_loop(thread_rx, thread_tx, ifname);
+                                    });
+
+                                    self.ecat = Some(ChosenEcatNetwork {
+                                        ds402_tx: main_tx,
+                                        ds402_rx: main_rx,
+                                        network_itf: interface_name.to_owned(),
+                                        driver: handle,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+
             if ui.button("add motor").clicked() {
                 self.motors.push(MotorUiConfig::new())
             }
 
             while let Ok((rx_ip, msg)) = self.fourier_rx.try_recv() {
-
                 if let Some(motor) = self.motors.iter_mut().find(|m| {
                     match m.backend {
                         MotorUiBackendConfig::Fourier(motor_backend::fourier::MotorUiConfig {ip, ..}) => ip == Some(rx_ip),
@@ -677,8 +784,34 @@ impl eframe::App for AppState {
                 }
             }
 
+            if let Some(ds402_rx) = self.ecat.as_ref().map(|ecat| &ecat.ds402_rx) {
+                while let Ok((rx_idx, msg)) = ds402_rx.try_recv() {
+                    if let Some(motor) = self.motors.iter_mut().find(|m| {
+                        match m.backend {
+                            MotorUiBackendConfig::Ds402(motor_backend::ds402::MotorUiConfig {idx, added, ..}) => added && idx == Some(rx_idx),
+                            _ => false,
+                        }
+                    }) {
+                        match msg {
+                            Ds402Response::OutputCVP(cvp, time) => {
+                                if !motor.ignore_motor_output {
+                                    motor.output.push((cvp, time));
+                                }
+                            }
+                            Ds402Response::ControllerAdjustedCVP(_cvp, _time) => {
+
+                            }
+                            Ds402Response::EndWaveform => {
+                                motor.ignore_motor_output = true;
+                            }
+                            msg => println!("received from fourier: {msg:?}"),
+                        }
+                    }
+                }
+            }
+
             for motor in &mut self.motors {
-                motor.display(&self.fourier_tx, ui, ctx)
+                motor.display(&self.fourier_tx, self.ecat.as_ref().map(|ecat| &ecat.ds402_tx), ui, ctx)
             }
         });
     }

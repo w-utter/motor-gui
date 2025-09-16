@@ -2,6 +2,8 @@ use io_uring::squeue::Entry as SQEntry;
 use io_uring::squeue::PushError as SQPushError;
 use io_uring::types::Timespec;
 
+use super::{Backend, RequestedMotorInput};
+
 use std::os::fd::{AsRawFd, RawFd};
 
 pub(crate) struct FourierConfig {
@@ -46,6 +48,11 @@ impl MotorUiConfig {
                     }
                     _ => (),
                 }
+
+                if ip_buf_storage.is_empty() {
+                    *ip = None;
+                }
+
             }
 
             if let Some(ip) = &ip {
@@ -102,37 +109,6 @@ impl FourierSendRecv {
         }
         Ok(())
     }
-}
-
-enum RequestedMotorInput {
-    Cvp(crate::motor_ctx::CVP),
-    Step(crate::StepInput),
-    Impulse(crate::ImpulseInput),
-    Custom(Vec<(crate::motor_ctx::CVP, time::Duration)>)
-}
-
-
-pub struct Backend<T> {
-    motor_config: MotorConfig,
-    input_cvp: Option<crate::motor_ctx::CVP>,
-    request_input: Option<(std::time::Instant, RequestedMotorInput)>,
-    backend_specific: T,
-}
-
-impl <T> Backend<T> {
-    fn new(
-        motor_config: MotorConfig,
-        backend_specific: T,
-        request_input: Option<RequestedMotorInput>,
-    ) -> Self {
-        Self {
-            motor_config,
-            input_cvp: None,
-            backend_specific,
-            request_input: request_input.map(|inp| (std::time::Instant::now(), inp)),
-        }
-    }
-
 }
 
 pub(crate) struct FourierBackend<const R: usize, const W: usize> {
