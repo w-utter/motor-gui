@@ -52,7 +52,6 @@ impl MotorUiConfig {
                 if ip_buf_storage.is_empty() {
                     *ip = None;
                 }
-
             }
 
             if let Some(ip) = &ip {
@@ -121,7 +120,11 @@ pub(crate) struct FourierBackend<const R: usize, const W: usize> {
 use crate::motor_ctx::{ControlState, MotorConfig};
 
 impl<const R: usize, const W: usize> FourierBackend<R, W> {
-    pub fn new(ip_addr: Ipv4Addr, encode: FourierEncodeKind, read_timeout: Option<Timespec>) -> Result<Self, amber_aios::Err> {
+    pub fn new(
+        ip_addr: Ipv4Addr,
+        encode: FourierEncodeKind,
+        read_timeout: Option<Timespec>,
+    ) -> Result<Self, amber_aios::Err> {
         let motor = amber_aios::AiosMotor::from_addr(ip_addr)?;
 
         let config = FourierConfig {
@@ -141,7 +144,7 @@ impl<const R: usize, const W: usize> FourierBackend<R, W> {
         &mut self,
         cvp: crate::motor_ctx::CVP,
         mode: &ControlState,
-        f: impl FnOnce(FourierSendRecv) -> std::io::Result<()>
+        f: impl FnOnce(FourierSendRecv) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
         let set_pos = amber_aios::cmds::binary::set_input_position(
             cvp.position as _,
@@ -223,7 +226,9 @@ impl<const R: usize, const W: usize> FourierBackend<R, W> {
             .read_timeout
             .unwrap_or(DEFAULT_FOURIER_READ_TIMEOUT);
 
-        let recv_timeout = LinkTimeout::new(&read_timeout).build().user_data(motor.addr().to_bits() as u64);
+        let recv_timeout = LinkTimeout::new(&read_timeout)
+            .build()
+            .user_data(motor.addr().to_bits() as u64);
 
         f(FourierSendRecv {
             send,
@@ -240,7 +245,6 @@ impl<const R: usize, const W: usize> FourierBackend<R, W> {
         use amber_aios::cmds::Command;
         use amber_aios::cmds::binary::BinaryCommand;
         let bytes = &self.motor.read_buf()[..len];
-
 
         if !self.enabled {
             if let Ok(amber_aios::Request {
@@ -274,12 +278,17 @@ impl<const R: usize, const W: usize> FourierBackend<R, W> {
     }
 }
 
-impl <const R: usize, const W: usize> Backend<FourierBackend<R, W>> {
+impl<const R: usize, const W: usize> Backend<FourierBackend<R, W>> {
     pub fn prepare_input_msg(
         &mut self,
-        f: impl FnOnce(FourierSendRecv) -> std::io::Result<()>
+        f: impl FnOnce(FourierSendRecv) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
-        let cvp = if let Some(crate::motor_ctx::CVP {position, velocity, current}) = &self.input_cvp {
+        let cvp = if let Some(crate::motor_ctx::CVP {
+            position,
+            velocity,
+            current,
+        }) = &self.input_cvp
+        {
             let gear_reduction = self.motor_config.gear_reduction;
             crate::motor_ctx::CVP {
                 position: position * gear_reduction,
@@ -293,7 +302,8 @@ impl <const R: usize, const W: usize> Backend<FourierBackend<R, W>> {
                 current: 0.,
             }
         };
-        self.backend_specific.prepare_input_msg(cvp, &self.motor_config.state, f)
+        self.backend_specific
+            .prepare_input_msg(cvp, &self.motor_config.state, f)
     }
 
     pub fn parse_cvp(
@@ -308,7 +318,8 @@ impl <const R: usize, const W: usize> Backend<FourierBackend<R, W>> {
                     prep.queue(&mut ring.submission()).unwrap();
                     ring.submit()?;
                     Ok(())
-                }).unwrap();
+                })
+                .unwrap();
                 None
             }
         }
@@ -323,7 +334,10 @@ impl <const R: usize, const W: usize> Backend<FourierBackend<R, W>> {
                 let elapsed = now.duration_since(*then);
 
                 if elapsed > s.delay + s.on_dur {
-                    let _ = end_tx.send((self.backend_specific.motor.addr(), FourierResponse::EndWaveform));
+                    let _ = end_tx.send((
+                        self.backend_specific.motor.addr(),
+                        FourierResponse::EndWaveform,
+                    ));
                     None
                 } else if elapsed > s.delay {
                     Some(crate::motor_ctx::CVP {
@@ -341,7 +355,10 @@ impl <const R: usize, const W: usize> Backend<FourierBackend<R, W>> {
                 const EPSILON: time::Duration = time::Duration::from_millis(10);
 
                 if elapsed > i.delay + i.delay {
-                    let _ = end_tx.send((self.backend_specific.motor.addr(), FourierResponse::EndWaveform));
+                    let _ = end_tx.send((
+                        self.backend_specific.motor.addr(),
+                        FourierResponse::EndWaveform,
+                    ));
                     None
                 } else if elapsed < i.delay + EPSILON && elapsed > i.delay - EPSILON {
                     Some(crate::motor_ctx::CVP {
@@ -368,7 +385,10 @@ impl <const R: usize, const W: usize> Backend<FourierBackend<R, W>> {
                 });
 
                 if cvp.is_none() {
-                    let _ = end_tx.send((self.backend_specific.motor.addr(), FourierResponse::EndWaveform));
+                    let _ = end_tx.send((
+                        self.backend_specific.motor.addr(),
+                        FourierResponse::EndWaveform,
+                    ));
                 }
                 cvp
             }
@@ -415,7 +435,10 @@ pub enum FourierResponse {
     EndWaveform,
 }
 
-pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::Sender<(Ipv4Addr, FourierResponse)>) -> std::io::Result<()> {
+pub fn event_loop(
+    cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>,
+    err_tx: mpsc::Sender<(Ipv4Addr, FourierResponse)>,
+) -> std::io::Result<()> {
     let mut ring = io_uring::IoUring::new(16)?;
     use std::collections::HashMap;
     let mut connections = HashMap::new();
@@ -425,7 +448,10 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
 
     use io_uring::opcode::{LinkTimeout, Recv, Send};
 
-    if !probe.is_supported(LinkTimeout::CODE) || !probe.is_supported(Recv::CODE) || !probe.is_supported(Send::CODE) {
+    if !probe.is_supported(LinkTimeout::CODE)
+        || !probe.is_supported(Recv::CODE)
+        || !probe.is_supported(Send::CODE)
+    {
         panic!("opcodes not supported");
     }
 
@@ -434,25 +460,35 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
     loop {
         while let Some((ip, cmd)) = match cmd_rx.try_recv() {
             Ok(cmd) => Some(cmd),
-            Err(mpsc::TryRecvError::Disconnected) => return Err(std::io::Error::new(std::io::ErrorKind::Other, "disconnected")),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "disconnected",
+                ));
+            }
             _ => None,
-
         } {
             match cmd {
                 FourierCmd::Add(encode, timeout, motor_config) => {
-
                     if connections.contains_key(&ip) {
                         let _ = err_tx.send((ip, FourierResponse::DuplicateConnections));
                         continue;
                     }
 
-                    let mut motor = Backend::new(motor_config, FourierBackend::<2048, 2048>::new(ip, encode, timeout).map_err(|_| std::io::Error::other("a"))?, None);
+                    let mut motor = Backend::new(
+                        motor_config,
+                        FourierBackend::<2048, 2048>::new(ip, encode, timeout)
+                            .map_err(|_| std::io::Error::other("a"))?,
+                        None,
+                    );
 
-                    motor.prepare_input_msg(|prep| {
-                        prep.queue(&mut ring.submission()).unwrap();
-                        ring.submit()?;
-                        Ok(())
-                    }).unwrap();
+                    motor
+                        .prepare_input_msg(|prep| {
+                            prep.queue(&mut ring.submission()).unwrap();
+                            ring.submit()?;
+                            Ok(())
+                        })
+                        .unwrap();
 
                     connections.insert(ip, motor);
                 }
@@ -465,7 +501,6 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
                         match waveform {
                             MotorInput::Constant(c) => {
                                 if !motor.backend_specific.remove_next_recv {
-
                                     let cvp = crate::motor_ctx::CVP {
                                         velocity: c,
                                         position: 0.,
@@ -473,13 +508,15 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
                                     };
 
                                     motor.input_cvp = Some(cvp);
-                                    motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)))
+                                    motor.request_input =
+                                        Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)))
                                 }
                             }
                             MotorInput::Idle => {
                                 let cvp = crate::motor_ctx::CVP::default();
                                 motor.input_cvp = Some(cvp);
-                                motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)));
+                                motor.request_input =
+                                    Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)));
                             }
                             MotorInput::Step(s) => {
                                 let cvp = if s.delay <= time::Duration::ZERO {
@@ -493,7 +530,8 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
                                 };
 
                                 motor.input_cvp = Some(cvp);
-                                motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Step(s)))
+                                motor.request_input =
+                                    Some((time::Instant::now(), RequestedMotorInput::Step(s)))
                             }
                             MotorInput::Impulse(i) => {
                                 let cvp = if i.delay < time::Duration::ZERO {
@@ -507,22 +545,28 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
                                 };
 
                                 motor.input_cvp = Some(cvp);
-                                motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Impulse(i)))
+                                motor.request_input =
+                                    Some((time::Instant::now(), RequestedMotorInput::Impulse(i)))
                             }
                             MotorInput::Custom(c) => {
-                                let cvps = c.into_iter().map(|(mag, time)| {
-                                    let cvp = crate::motor_ctx::CVP {
-                                        velocity: mag,
-                                        position: 0.,
-                                        current: 0.,
-                                    };
-                                    (cvp, time)
-                                }).collect::<Vec<_>>();
+                                let cvps = c
+                                    .into_iter()
+                                    .map(|(mag, time)| {
+                                        let cvp = crate::motor_ctx::CVP {
+                                            velocity: mag,
+                                            position: 0.,
+                                            current: 0.,
+                                        };
+                                        (cvp, time)
+                                    })
+                                    .collect::<Vec<_>>();
 
-                                let cvp = cvps.iter().next().map(|(cvp, _)| *cvp).unwrap_or_default();
+                                let cvp =
+                                    cvps.iter().next().map(|(cvp, _)| *cvp).unwrap_or_default();
 
                                 motor.input_cvp = Some(cvp);
-                                motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Custom(cvps)))
+                                motor.request_input =
+                                    Some((time::Instant::now(), RequestedMotorInput::Custom(cvps)))
                             }
                         }
                     }
@@ -567,7 +611,7 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
                     connections.remove(&ip);
                     if request_shutdown && connections.is_empty() {
                         // no more in flight requests and all motors have been shut down
-                        return Ok(())
+                        return Ok(());
                     }
                     // motor has been idled
                     continue;
@@ -580,17 +624,23 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
                     let input = motor.input_cvp.unwrap_or_default();
 
                     let new_input = controller.update(input, cvp, &motor.motor_config.state);
-                    let _ = err_tx.send((ip, FourierResponse::ControllerAdjustedCVP(new_input, time::Instant::now())));
+                    let _ = err_tx.send((
+                        ip,
+                        FourierResponse::ControllerAdjustedCVP(new_input, time::Instant::now()),
+                    ));
                     motor.input_cvp = Some(new_input);
                 } else {
-                    let _ = err_tx.send((ip, FourierResponse::OutputCVP(cvp, time::Instant::now())));
+                    let _ =
+                        err_tx.send((ip, FourierResponse::OutputCVP(cvp, time::Instant::now())));
                 }
 
-                motor.prepare_input_msg(|prep| {
-                    prep.queue(&mut ring.submission()).unwrap();
-                    ring.submit()?;
-                    Ok(())
-                }).unwrap();
+                motor
+                    .prepare_input_msg(|prep| {
+                        prep.queue(&mut ring.submission()).unwrap();
+                        ring.submit()?;
+                        Ok(())
+                    })
+                    .unwrap();
             } else {
                 let errno = -result;
 
@@ -604,20 +654,27 @@ pub fn event_loop(cmd_rx: mpsc::Receiver<(Ipv4Addr, FourierCmd)>, err_tx: mpsc::
                     libc::ETIME => {
                         motor.backend_specific.enabled = false;
                         let _ = err_tx.send((ip, FourierResponse::Timeout));
-                        motor.prepare_input_msg(|prep| {
-                            prep.queue(&mut ring.submission()).unwrap();
-                            ring.submit()?;
-                            Ok(())
-                        }).unwrap();
+                        motor
+                            .prepare_input_msg(|prep| {
+                                prep.queue(&mut ring.submission()).unwrap();
+                                ring.submit()?;
+                                Ok(())
+                            })
+                            .unwrap();
                     }
                     _ => {
-                        let _ = err_tx.send((ip, FourierResponse::Error(std::io::Error::from_raw_os_error(errno))));
+                        let _ = err_tx.send((
+                            ip,
+                            FourierResponse::Error(std::io::Error::from_raw_os_error(errno)),
+                        ));
 
-                        motor.prepare_input_msg(|prep| {
-                            prep.queue(&mut ring.submission()).unwrap();
-                            ring.submit()?;
-                            Ok(())
-                        }).unwrap();
+                        motor
+                            .prepare_input_msg(|prep| {
+                                prep.queue(&mut ring.submission()).unwrap();
+                                ring.submit()?;
+                                Ok(())
+                            })
+                            .unwrap();
                     }
                 }
             }

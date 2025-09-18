@@ -5,7 +5,12 @@ use crate::motor_ctx;
 pub enum Controller {}
 
 impl Controller {
-    pub fn update(&mut self, _input: motor_ctx::CVP, _output: motor_ctx::CVP, _control_state: &motor_ctx::ControlState) -> motor_ctx::CVP {
+    pub fn update(
+        &mut self,
+        _input: motor_ctx::CVP,
+        _output: motor_ctx::CVP,
+        _control_state: &motor_ctx::ControlState,
+    ) -> motor_ctx::CVP {
         todo!()
     }
 }

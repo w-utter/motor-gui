@@ -15,11 +15,11 @@ use std::collections::BTreeMap;
 use ethercrab::MainDevice;
 use ethercrab::std::RawSocketDesc;
 
-use std::time;
 use std::sync::mpsc;
+use std::time;
 
-use crate::motor_backend::Backend;
 use crate::MotorInput;
+use crate::motor_backend::Backend;
 use crate::motor_backend::RequestedMotorInput;
 
 struct UiContext {
@@ -27,7 +27,11 @@ struct UiContext {
     input: crate::MotorInput,
 }
 
-pub(crate) fn event_loop(cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>, err_tx: mpsc::Sender<(usize, Ds402Response)>, network_interface: impl AsRef<str>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn event_loop(
+    cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>,
+    err_tx: mpsc::Sender<(usize, Ds402Response)>,
+    network_interface: impl AsRef<str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (_tx, mut rx, pdu_loop) = PDU_STORAGE.try_split().expect("cannot split pdu");
 
     let mut maindevice = MainDevice::new(
@@ -158,8 +162,7 @@ pub(crate) fn event_loop(cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>, err_tx: mpsc
                             ready = true;
                             let _ = state.update(
                                 received, maindev, retries, &timeout, entries, &sock, ring, subdev,
-                                index, identifier,
-                                &err_tx,
+                                index, identifier, &err_tx,
                             );
                             Ok(())
                         },
@@ -240,7 +243,6 @@ pub(crate) fn event_loop(cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>, err_tx: mpsc
             while let Ok((idx, cmd)) = cmd_rx.try_recv() {
                 match cmd {
                     Ds402Cmd::Add(cfg) => {
-
                         if let Some((motor, state)) = {
                             match &mut state {
                                 InitState::Op(d) => d.subdev_mut(idx),
@@ -254,7 +256,8 @@ pub(crate) fn event_loop(cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>, err_tx: mpsc
                                     if s.is_none() {
                                         *s = Some(backend);
                                     } else {
-                                        let _ = err_tx.send((idx, Ds402Response::DuplicateInstances));
+                                        let _ =
+                                            err_tx.send((idx, Ds402Response::DuplicateInstances));
                                     }
                                 }
                                 _ => (),
@@ -281,12 +284,14 @@ pub(crate) fn event_loop(cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>, err_tx: mpsc
                                     };
 
                                     motor.input_cvp = Some(cvp);
-                                    motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)))
+                                    motor.request_input =
+                                        Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)))
                                 }
                                 MotorInput::Idle => {
                                     let cvp = crate::motor_ctx::CVP::default();
                                     motor.input_cvp = Some(cvp);
-                                    motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)));
+                                    motor.request_input =
+                                        Some((time::Instant::now(), RequestedMotorInput::Cvp(cvp)));
                                 }
                                 MotorInput::Step(s) => {
                                     let cvp = if s.delay <= time::Duration::ZERO {
@@ -300,7 +305,8 @@ pub(crate) fn event_loop(cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>, err_tx: mpsc
                                     };
 
                                     motor.input_cvp = Some(cvp);
-                                    motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Step(s)))
+                                    motor.request_input =
+                                        Some((time::Instant::now(), RequestedMotorInput::Step(s)))
                                 }
                                 MotorInput::Impulse(i) => {
                                     let cvp = if i.delay < time::Duration::ZERO {
@@ -314,22 +320,32 @@ pub(crate) fn event_loop(cmd_rx: mpsc::Receiver<(usize, Ds402Cmd)>, err_tx: mpsc
                                     };
 
                                     motor.input_cvp = Some(cvp);
-                                    motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Impulse(i)))
+                                    motor.request_input = Some((
+                                        time::Instant::now(),
+                                        RequestedMotorInput::Impulse(i),
+                                    ))
                                 }
                                 MotorInput::Custom(c) => {
-                                    let cvps = c.into_iter().map(|(mag, time)| {
-                                        let cvp = crate::motor_ctx::CVP {
-                                            velocity: mag,
-                                            position: 0.,
-                                            current: 0.,
-                                        };
-                                        (cvp, time)
-                                    }).collect::<Vec<_>>();
+                                    let cvps = c
+                                        .into_iter()
+                                        .map(|(mag, time)| {
+                                            let cvp = crate::motor_ctx::CVP {
+                                                velocity: mag,
+                                                position: 0.,
+                                                current: 0.,
+                                            };
+                                            (cvp, time)
+                                        })
+                                        .collect::<Vec<_>>();
 
-                                    let cvp = cvps.iter().next().map(|(cvp, _)| *cvp).unwrap_or_default();
+                                    let cvp =
+                                        cvps.iter().next().map(|(cvp, _)| *cvp).unwrap_or_default();
 
                                     motor.input_cvp = Some(cvp);
-                                    motor.request_input = Some((time::Instant::now(), RequestedMotorInput::Custom(cvps)))
+                                    motor.request_input = Some((
+                                        time::Instant::now(),
+                                        RequestedMotorInput::Custom(cvps),
+                                    ))
                                 }
                             }
                         }
@@ -486,7 +502,10 @@ impl UserState {
                     velocity: recv.velocity as _,
                 };
 
-                err_tx.send((idx as _, Ds402Response::OutputCVP(out_cvp, time::Instant::now())));
+                err_tx.send((
+                    idx as _,
+                    Ds402Response::OutputCVP(out_cvp, time::Instant::now()),
+                ));
 
                 //TODO: motor output needs to be sent to the gui
                 //let _ = err_tx.send((ip, FourierResponse::OutputCVP(cvp, time::Instant::now())));
@@ -685,4 +704,3 @@ impl Backend<Ds402Backend> {
         self.input_cvp = next_input;
     }
 }
-

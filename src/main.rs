@@ -6,14 +6,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "",
         Default::default(),
-        Box::new(|_cc| {
-            Ok(Box::new(AppState::new()))
-        })
+        Box::new(|_cc| Ok(Box::new(AppState::new()))),
     )
 }
 
-pub use motor_backend::fourier::{FourierCmd, FourierResponse};
 pub use motor_backend::ds402::{Ds402Cmd, Ds402Response};
+pub use motor_backend::fourier::{FourierCmd, FourierResponse};
 
 struct AppState {
     motors: Vec<MotorUiConfig>,
@@ -37,9 +35,8 @@ impl AppState {
         let (fourier_tx, thread_rx) = std::sync::mpsc::channel();
         let (thread_tx, fourier_rx) = std::sync::mpsc::channel();
 
-        let fourier_handle = std::thread::spawn(|| {
-            motor_backend::fourier::event_loop(thread_rx, thread_tx)
-        });
+        let fourier_handle =
+            std::thread::spawn(|| motor_backend::fourier::event_loop(thread_rx, thread_tx));
 
         AppState {
             motors: vec![],
@@ -74,13 +71,13 @@ macro_rules! write_bits {
     ($this:expr, $off_1:expr, $off_2:expr, $bit_1:expr, $bit_2:expr) => {
         $this &= !((1 << $off_1) | (1 << $off_2));
         $this |= (u8::from($bit_1) << $off_1) | (u8::from($bit_2) << $off_2);
-    }
+    };
 }
 
 macro_rules! read_bit {
     ($this:expr, $offset:expr) => {
         ($this & (1 << $offset)) > 0
-    }
+    };
 }
 
 impl ControlStateCache {
@@ -129,22 +126,52 @@ impl ControlState {
     fn display(&mut self, cache: &mut ControlStateCache, ui: &mut egui::Ui) -> bool {
         let prev = self.clone();
 
-        ui.radio_value(self, ControlState::Position { show_velocity: cache.pos_ctrl_vel(), show_torque: cache.pos_ctrl_i() }, "position");
-        ui.radio_value(self, ControlState::Velocity { show_position: cache.vel_ctrl_pos(), show_torque: cache.vel_ctrl_i() }, "velocity");
-        ui.radio_value(self, ControlState::Torque { show_velocity: cache.i_ctrl_vel(), show_position: cache.i_ctrl_pos() }, "torque");
+        ui.radio_value(
+            self,
+            ControlState::Position {
+                show_velocity: cache.pos_ctrl_vel(),
+                show_torque: cache.pos_ctrl_i(),
+            },
+            "position",
+        );
+        ui.radio_value(
+            self,
+            ControlState::Velocity {
+                show_position: cache.vel_ctrl_pos(),
+                show_torque: cache.vel_ctrl_i(),
+            },
+            "velocity",
+        );
+        ui.radio_value(
+            self,
+            ControlState::Torque {
+                show_velocity: cache.i_ctrl_vel(),
+                show_position: cache.i_ctrl_pos(),
+            },
+            "torque",
+        );
 
         match self {
-            Self::Position { show_velocity, show_torque } => {
+            Self::Position {
+                show_velocity,
+                show_torque,
+            } => {
                 ui.checkbox(show_velocity, "show velocity");
                 ui.checkbox(show_torque, "show torque");
                 cache.set_pos_ctrl(*show_velocity, *show_torque);
             }
-            Self::Velocity { show_position, show_torque } => {
+            Self::Velocity {
+                show_position,
+                show_torque,
+            } => {
                 ui.checkbox(show_position, "show position");
                 ui.checkbox(show_torque, "show torque");
                 cache.set_vel_ctrl(*show_position, *show_torque);
             }
-            Self::Torque { show_position, show_velocity } => {
+            Self::Torque {
+                show_position,
+                show_velocity,
+            } => {
                 ui.checkbox(show_position, "show position");
                 ui.checkbox(show_velocity, "show velocity");
                 cache.set_i_ctrl(*show_position, *show_velocity);
@@ -174,13 +201,26 @@ impl MotorUiConfig {
         }
     }
 
-    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn display(
+        &mut self,
+        fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>,
+        ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) {
         let mut changed = false;
-        changed |= self.control_state.display(&mut self.control_state_cache, ui);
-        changed |= self.backend.display(fourier_tx, ds402_tx, &self.control_state, ui);
+        changed |= self
+            .control_state
+            .display(&mut self.control_state_cache, ui);
+        changed |= self
+            .backend
+            .display(fourier_tx, ds402_tx, &self.control_state, ui);
         ui.horizontal(|ui| {
             ui.label("gear reduction: ");
-            if ui.text_edit_singleline(&mut self.gear_reduction_storage).changed() {
+            if ui
+                .text_edit_singleline(&mut self.gear_reduction_storage)
+                .changed()
+            {
                 match self.gear_reduction_storage.parse::<f64>() {
                     Ok(new_gear_reduction) if new_gear_reduction != self.gear_reduction => {
                         self.gear_reduction = new_gear_reduction;
@@ -195,67 +235,79 @@ impl MotorUiConfig {
         changed |= self.input.display_options(&mut self.input_cache, ui, ctx);
         let _changed = changed;
 
-        ui.vertical(|ui| {
-            match &self.backend {
-                MotorUiBackendConfig::Fourier(config) => {
-                    if let Some(ip) = config.ip_addr() {
-                        if ui.button("send to motor").clicked() {
-                            self.output.clear();
-                            self.ignore_motor_output = false;
-                            let _ = fourier_tx.send((ip, FourierCmd::SetWaveForm(self.input.clone())));
-                        }
+        ui.vertical(|ui| match &self.backend {
+            MotorUiBackendConfig::Fourier(config) => {
+                if let Some(ip) = config.ip_addr() {
+                    if ui.button("send to motor").clicked() {
+                        self.output.clear();
+                        self.ignore_motor_output = false;
+                        let _ = fourier_tx.send((ip, FourierCmd::SetWaveForm(self.input.clone())));
+                    }
 
-                        if ui.button("stop").clicked() {
-                            self.ignore_motor_output = true;
-                            let _ = fourier_tx.send((ip, FourierCmd::StopWaveform));
-                        }
+                    if ui.button("stop").clicked() {
+                        self.ignore_motor_output = true;
+                        let _ = fourier_tx.send((ip, FourierCmd::StopWaveform));
                     }
                 }
-                MotorUiBackendConfig::Ds402(config) => {
-                    if let (Some(tx), Some(idx)) = (ds402_tx, config.idx) {
-                        if ui.button("send to motor").clicked() {
-                            self.output.clear();
-                            self.ignore_motor_output = false;
-                            let _ = tx.send((idx, Ds402Cmd::SetWaveForm(self.input.clone())));
-                        }
-
-                        if ui.button("stop").clicked() {
-                            self.ignore_motor_output = true;
-                            let _ = tx.send((idx, Ds402Cmd::StopWaveform));
-                        }
-                    }
-                }
-                _ => (),
             }
+            MotorUiBackendConfig::Ds402(config) => {
+                if let (Some(tx), Some(idx)) = (ds402_tx, config.idx) {
+                    if ui.button("send to motor").clicked() {
+                        self.output.clear();
+                        self.ignore_motor_output = false;
+                        let _ = tx.send((idx, Ds402Cmd::SetWaveForm(self.input.clone())));
+                    }
+
+                    if ui.button("stop").clicked() {
+                        self.ignore_motor_output = true;
+                        let _ = tx.send((idx, Ds402Cmd::StopWaveform));
+                    }
+                }
+            }
+            _ => (),
         });
 
         self.display_output_graph(ui, ctx)
     }
 
     fn display_output_graph(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let first_time = self.output.first().map(|(_, time)| *time).unwrap_or(std::time::Instant::now());
+        let first_time = self
+            .output
+            .first()
+            .map(|(_, time)| *time)
+            .unwrap_or(std::time::Instant::now());
 
         let contents = vec![];
         let mut writer = csv::Writer::from_writer(contents);
 
         egui::Window::new("output window").show(ctx, |ui| {
             ui.vertical(|ui| {
-                use egui_plot::{PlotPoint, PlotPoints, Line};
+                use egui_plot::{Line, PlotPoint, PlotPoints};
 
-                let main_points = self.output.iter().map(|(cvp, time)| {
-                    let time = time.duration_since(first_time).as_secs_f64();
+                let main_points = self
+                    .output
+                    .iter()
+                    .map(|(cvp, time)| {
+                        let time = time.duration_since(first_time).as_secs_f64();
 
-                    PlotPoint::new(time, cvp.velocity)
-                }).collect::<Vec<_>>();
+                        PlotPoint::new(time, cvp.velocity)
+                    })
+                    .collect::<Vec<_>>();
 
                 if ui.button("save as CSV").clicked() {
                     for PlotPoint { x, y } in &main_points {
-                        writer.write_record(&[format!("{x}"), format!("{y}")]).unwrap();
+                        writer
+                            .write_record(&[format!("{x}"), format!("{y}")])
+                            .unwrap();
                     }
 
-
                     let time = chrono::Utc::now().to_rfc3339();
-                    if let Ok(mut file) = std::fs::File::create(format!("{}/velocity-graph-{time}.csv", std::env::home_dir().unwrap_or(std::path::PathBuf::from("/")).display())) {
+                    if let Ok(mut file) = std::fs::File::create(format!(
+                        "{}/velocity-graph-{time}.csv",
+                        std::env::home_dir()
+                            .unwrap_or(std::path::PathBuf::from("/"))
+                            .display()
+                    )) {
                         let mut buf = writer.into_inner().unwrap();
                         use std::io::Write;
                         file.write(&buf).unwrap();
@@ -263,35 +315,47 @@ impl MotorUiConfig {
                     }
                 }
 
-                egui_plot::Plot::new("output")
-                    .show(ui, |plot| {
-                        plot.line(Line::new("vel", PlotPoints::Owned(main_points)));
-                    });
+                egui_plot::Plot::new("output").show(ui, |plot| {
+                    plot.line(Line::new("vel", PlotPoints::Owned(main_points)));
+                });
             });
         });
 
         let contents = vec![];
         let mut writer = csv::Writer::from_writer(contents);
 
-        if matches!(self.control_state, ControlState::Velocity {show_position: true, .. }) {
+        if matches!(
+            self.control_state,
+            ControlState::Velocity {
+                show_position: true,
+                ..
+            }
+        ) {
             egui::Window::new("output window pos").show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    use egui_plot::{PlotPoint, PlotPoints, Line};
+                    use egui_plot::{Line, PlotPoint, PlotPoints};
 
-                    let sub_points_1 = self.output.iter().map(|(cvp, time)| {
-                        let time = time.duration_since(first_time).as_secs_f64();
+                    let sub_points_1 = self
+                        .output
+                        .iter()
+                        .map(|(cvp, time)| {
+                            let time = time.duration_since(first_time).as_secs_f64();
 
-                        PlotPoint::new(time, cvp.position)
-                    }).collect::<Vec<_>>();
-
+                            PlotPoint::new(time, cvp.position)
+                        })
+                        .collect::<Vec<_>>();
 
                     if ui.button("save as CSV").clicked() {
                         for PlotPoint { x, y } in &sub_points_1 {
-                            (&mut writer).write_record(&[format!("{x}"), format!("{y}")]).unwrap();
+                            (&mut writer)
+                                .write_record(&[format!("{x}"), format!("{y}")])
+                                .unwrap();
                         }
 
                         let time = chrono::Utc::now().to_rfc3339();
-                        if let Ok(mut file) = std::fs::File::create(format!("position-graph-{time}.csv")) {
+                        if let Ok(mut file) =
+                            std::fs::File::create(format!("position-graph-{time}.csv"))
+                        {
                             let mut buf = writer.into_inner().unwrap();
                             use std::io::Write;
                             file.write(&buf).unwrap();
@@ -299,10 +363,9 @@ impl MotorUiConfig {
                         }
                     }
 
-                    egui_plot::Plot::new("output")
-                        .show(ui, |plot| {
-                            plot.line(Line::new("pos", PlotPoints::Owned(sub_points_1)));
-                        })
+                    egui_plot::Plot::new("output").show(ui, |plot| {
+                        plot.line(Line::new("pos", PlotPoints::Owned(sub_points_1)));
+                    })
                 })
             });
         }
@@ -310,25 +373,38 @@ impl MotorUiConfig {
         let contents = vec![];
         let mut writer = csv::Writer::from_writer(contents);
 
-        if matches!(self.control_state, ControlState::Velocity {show_torque: true, .. }) {
+        if matches!(
+            self.control_state,
+            ControlState::Velocity {
+                show_torque: true,
+                ..
+            }
+        ) {
             egui::Window::new("output window current").show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    use egui_plot::{PlotPoint, PlotPoints, Line};
+                    use egui_plot::{Line, PlotPoint, PlotPoints};
 
-                    let sub_points_2 = self.output.iter().map(|(cvp, time)| {
-                        let time = time.duration_since(first_time).as_secs_f64();
+                    let sub_points_2 = self
+                        .output
+                        .iter()
+                        .map(|(cvp, time)| {
+                            let time = time.duration_since(first_time).as_secs_f64();
 
-                        PlotPoint::new(time, cvp.current)
-                    }).collect::<Vec<_>>();
-
+                            PlotPoint::new(time, cvp.current)
+                        })
+                        .collect::<Vec<_>>();
 
                     if ui.button("save as CSV").clicked() {
                         for PlotPoint { x, y } in &sub_points_2 {
-                            writer.write_record(&[format!("{x}"), format!("{y}")]).unwrap();
+                            writer
+                                .write_record(&[format!("{x}"), format!("{y}")])
+                                .unwrap();
                         }
 
                         let time = chrono::Utc::now().to_rfc3339();
-                        if let Ok(mut file) = std::fs::File::create(format!("current-graph-{time}.csv")) {
+                        if let Ok(mut file) =
+                            std::fs::File::create(format!("current-graph-{time}.csv"))
+                        {
                             let mut buf = writer.into_inner().unwrap();
                             use std::io::Write;
                             file.write(&buf).unwrap();
@@ -336,21 +412,17 @@ impl MotorUiConfig {
                         }
                     }
 
-                    egui_plot::Plot::new("output")
-                        .show(ui, |plot| {
-                            plot.line(Line::new("current", PlotPoints::Owned(sub_points_2)));
-                        })
+                    egui_plot::Plot::new("output").show(ui, |plot| {
+                        plot.line(Line::new("current", PlotPoints::Owned(sub_points_2)));
+                    })
                 })
             });
         }
-
-
 
         if ui.button("reset start time").clicked() {
             //self.start_instant = std::time::Instant::now();
             self.output.clear();
         }
-
     }
 }
 
@@ -360,20 +432,38 @@ impl MotorUiConfig {
 enum MotorUiBackendConfig {
     #[default]
     None,
-    Fourier( motor_backend::fourier::MotorUiConfig),
+    Fourier(motor_backend::fourier::MotorUiConfig),
     Ds402(motor_backend::ds402::MotorUiConfig),
 }
 
 impl MotorUiBackendConfig {
-    fn display(&mut self, fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>, ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>, control_state: &ControlState, ui: &mut egui::Ui) -> bool {
+    fn display(
+        &mut self,
+        fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>,
+        ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>,
+        control_state: &ControlState,
+        ui: &mut egui::Ui,
+    ) -> bool {
         ui.horizontal(|ui| {
             if !matches!(self, Self::None) && ui.add(egui::Button::new("clear config")).clicked() {
                 *self = Self::None;
             }
-            if ui.add(egui::RadioButton::new(matches!(self, Self::Fourier(_)), "Fourier")).clicked() {
+            if ui
+                .add(egui::RadioButton::new(
+                    matches!(self, Self::Fourier(_)),
+                    "Fourier",
+                ))
+                .clicked()
+            {
                 *self = Self::Fourier(Default::default());
             }
-            if ui.add(egui::RadioButton::new(matches!(self, Self::Ds402(_)), "ds402 (ethercat)")).clicked() {
+            if ui
+                .add(egui::RadioButton::new(
+                    matches!(self, Self::Ds402(_)),
+                    "ds402 (ethercat)",
+                ))
+                .clicked()
+            {
                 *self = Self::Ds402(Default::default());
             }
         });
@@ -390,48 +480,55 @@ impl MotorUiBackendConfig {
                         }
                     } else {
                         if ui.button("add").clicked() {
-                            let _ = fourier_tx.send((*addr, FourierCmd::Add(config.encoding, None, crate::motor_ctx::MotorConfig {
-                                gear_reduction: 1.,
-                                controller: None,
-                                state: control_state.clone(),
-                            })));
+                            let _ = fourier_tx.send((
+                                *addr,
+                                FourierCmd::Add(
+                                    config.encoding,
+                                    None,
+                                    crate::motor_ctx::MotorConfig {
+                                        gear_reduction: 1.,
+                                        controller: None,
+                                        state: control_state.clone(),
+                                    },
+                                ),
+                            ));
                             config.added = true;
                         }
                     }
                 }
                 changed
             }
-            Self::Ds402(config) => {
+            Self::Ds402(config) => match ds402_tx {
+                Some(tx) => {
+                    let changed = config.display(ui);
 
-                match ds402_tx {
-                    Some(tx) => {
-                        let changed = config.display(ui);
-
-                        if let Some(idx) = config.idx {
-                            if config.added {
-                                if ui.button("remove").clicked() {
-                                    let _ = tx.send((idx, Ds402Cmd::Remove));
-                                    config.added = false;
-                                }
-                            } else {
-                                if ui.button("add").clicked() {
-                                    let _ = tx.send((idx, Ds402Cmd::Add(crate::motor_ctx::MotorConfig {
+                    if let Some(idx) = config.idx {
+                        if config.added {
+                            if ui.button("remove").clicked() {
+                                let _ = tx.send((idx, Ds402Cmd::Remove));
+                                config.added = false;
+                            }
+                        } else {
+                            if ui.button("add").clicked() {
+                                let _ = tx.send((
+                                    idx,
+                                    Ds402Cmd::Add(crate::motor_ctx::MotorConfig {
                                         gear_reduction: 1.,
                                         controller: None,
                                         state: control_state.clone(),
-                                    })));
-                                    config.added = true;
-                                }
+                                    }),
+                                ));
+                                config.added = true;
                             }
                         }
-                        changed
                     }
-                    None => {
-                        ui.label("select a network interface for ethercat");
-                        false
-                    }
+                    changed
                 }
-            }
+                None => {
+                    ui.label("select a network interface for ethercat");
+                    false
+                }
+            },
             _ => false,
         }
     }
@@ -496,15 +593,43 @@ pub enum MotorInput {
     Custom(Vec<(f64, Duration)>),
 }
 
+macro_rules! calc_y_bounds {
+    ($y:expr) => {
+        if $y == 0. {
+            (-1., 1.)
+        } else if $y < 0. {
+            ($y, 0.)
+        } else if $y > 0. {
+            (0., $y)
+        } else {
+            unreachable!("invalid floating point repr");
+        }
+    };
+}
+
 impl MotorInput {
-    fn display_options(&mut self, cache: &mut MotorInputCache, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+    fn display_options(
+        &mut self,
+        cache: &mut MotorInputCache,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) -> bool {
         let mut changed = false;
-        if ui.add(egui::RadioButton::new(matches!(self, Self::Idle), "idle")).clicked() {
+        if ui
+            .add(egui::RadioButton::new(matches!(self, Self::Idle), "idle"))
+            .clicked()
+        {
             self.move_prev_input(Self::Idle, cache);
             changed = true;
         }
 
-        if ui.add(egui::RadioButton::new(matches!(self, Self::Constant(_)), "constant")).clicked() {
+        if ui
+            .add(egui::RadioButton::new(
+                matches!(self, Self::Constant(_)),
+                "constant",
+            ))
+            .clicked()
+        {
             if !matches!(self, Self::Constant(_)) {
                 if let Some(cached) = core::mem::take(&mut cache.constant) {
                     self.move_prev_input(Self::Constant(cached), cache);
@@ -515,7 +640,13 @@ impl MotorInput {
             }
         }
 
-        if ui.add(egui::RadioButton::new(matches!(self, Self::Step(_)), "step")).clicked() {
+        if ui
+            .add(egui::RadioButton::new(
+                matches!(self, Self::Step(_)),
+                "step",
+            ))
+            .clicked()
+        {
             if !matches!(self, Self::Step(_)) {
                 if let Some(cached) = core::mem::take(&mut cache.step) {
                     self.move_prev_input(Self::Step(cached), cache);
@@ -526,7 +657,13 @@ impl MotorInput {
             }
         }
 
-        if ui.add(egui::RadioButton::new(matches!(self, Self::Impulse(_)), "impulse")).clicked() {
+        if ui
+            .add(egui::RadioButton::new(
+                matches!(self, Self::Impulse(_)),
+                "impulse",
+            ))
+            .clicked()
+        {
             if !matches!(self, Self::Impulse(_)) {
                 if let Some(cached) = core::mem::take(&mut cache.impulse) {
                     self.move_prev_input(Self::Impulse(cached), cache);
@@ -537,7 +674,13 @@ impl MotorInput {
             }
         }
 
-        if ui.add(egui::RadioButton::new(matches!(self, Self::Custom(_)), "custom")).clicked() {
+        if ui
+            .add(egui::RadioButton::new(
+                matches!(self, Self::Custom(_)),
+                "custom",
+            ))
+            .clicked()
+        {
             if !matches!(self, Self::Custom(_)) {
                 let cached = core::mem::take(&mut cache.custom);
                 self.move_prev_input(Self::Custom(cached), cache);
@@ -561,10 +704,20 @@ impl MotorInput {
                 }
                 ui.label(format!("current magnitude: {}", c));
             }
-            Self::Step(StepInput { delay, magnitude, on_dur } ) => {
+            Self::Step(StepInput {
+                delay,
+                magnitude,
+                on_dur,
+            }) => {
                 ui.label("delay:");
-                if ui.text_edit_singleline(&mut cache.step_delay_storage).changed() {
-                    match cache.step_delay_storage.parse::<duration_string::DurationString>() {
+                if ui
+                    .text_edit_singleline(&mut cache.step_delay_storage)
+                    .changed()
+                {
+                    match cache
+                        .step_delay_storage
+                        .parse::<duration_string::DurationString>()
+                    {
                         Ok(new_delay) if new_delay != *delay => {
                             *delay = new_delay.into();
                             changed = true;
@@ -575,7 +728,10 @@ impl MotorInput {
                 }
                 ui.label(format!("current delay: {:#?}", delay));
                 ui.label("magnitude:");
-                if ui.text_edit_singleline(&mut cache.step_mag_storage).changed() {
+                if ui
+                    .text_edit_singleline(&mut cache.step_mag_storage)
+                    .changed()
+                {
                     match cache.step_mag_storage.parse::<f64>() {
                         Ok(new_mag) if new_mag != *magnitude => {
                             *magnitude = new_mag;
@@ -587,8 +743,14 @@ impl MotorInput {
                 }
                 ui.label(format!("current magnitude: {}", magnitude));
                 ui.label("duration:");
-                if ui.text_edit_singleline(&mut cache.step_dur_storage).changed() {
-                    match cache.step_dur_storage.parse::<duration_string::DurationString>() {
+                if ui
+                    .text_edit_singleline(&mut cache.step_dur_storage)
+                    .changed()
+                {
+                    match cache
+                        .step_dur_storage
+                        .parse::<duration_string::DurationString>()
+                    {
                         Ok(new_dur) if new_dur != *on_dur => {
                             *on_dur = new_dur.into();
                             changed = true;
@@ -599,10 +761,16 @@ impl MotorInput {
                 }
                 ui.label(format!("current duration: {:#?}", on_dur));
             }
-            Self::Impulse(ImpulseInput {magnitude, delay}) => {
+            Self::Impulse(ImpulseInput { magnitude, delay }) => {
                 ui.label("delay:");
-                if ui.text_edit_singleline(&mut cache.imp_delay_storage).changed() {
-                    match cache.imp_delay_storage.parse::<duration_string::DurationString>() {
+                if ui
+                    .text_edit_singleline(&mut cache.imp_delay_storage)
+                    .changed()
+                {
+                    match cache
+                        .imp_delay_storage
+                        .parse::<duration_string::DurationString>()
+                    {
                         Ok(new_delay) if new_delay != *delay => {
                             *delay = new_delay.into();
                             changed = true;
@@ -613,7 +781,10 @@ impl MotorInput {
                 }
                 ui.label(format!("current delay: {:#?}", delay));
                 ui.label("magnitude:");
-                if ui.text_edit_singleline(&mut cache.imp_mag_storage).changed() {
+                if ui
+                    .text_edit_singleline(&mut cache.imp_mag_storage)
+                    .changed()
+                {
                     match cache.imp_mag_storage.parse::<f64>() {
                         Ok(new_mag) if new_mag != *magnitude => {
                             *magnitude = new_mag;
@@ -638,33 +809,27 @@ impl MotorInput {
         }
 
         egui::Window::new("input window").show(ctx, |ui| {
-            use egui_plot::{PlotPoint, PlotPoints, Line};
+            use egui_plot::{Line, PlotPoint, PlotPoints};
             match self {
                 Self::Constant(c) => {
                     let pp1 = PlotPoint::new(0., *c);
                     let pp2 = PlotPoint::new(100., *c);
                     let points = [pp1, pp2];
 
-                    let min = if *c * 2. < 0. {
-                        *c * 2.
-                    } else {
-                        0.
-                    };
-
-                    let max = if *c * 2. > 0. {
-                        *c * 2.
-                    } else {
-                        0.
-                    };
+                    let (miny, maxy) = calc_y_bounds!(*c * 2.);
 
                     egui_plot::Plot::new("prelim")
                         .default_x_bounds(0., 10.)
-                        .default_y_bounds(min, max)
+                        .default_y_bounds(miny, maxy)
                         .show(ui, |plot| {
                             plot.line(Line::new("const", PlotPoints::Borrowed(&points)));
                         });
                 }
-                Self::Step(StepInput {delay, magnitude, on_dur} ) => {
+                Self::Step(StepInput {
+                    delay,
+                    magnitude,
+                    on_dur,
+                }) => {
                     let d1 = delay.as_secs_f64();
                     let d2 = on_dur.as_secs_f64();
 
@@ -674,26 +839,32 @@ impl MotorInput {
                     let pp4 = PlotPoint::new(d1 + d2, *magnitude);
                     let points = [pp1, pp2, pp3, pp4];
 
+                    let (miny, maxy) = calc_y_bounds!(*magnitude * 2.);
+
                     egui_plot::Plot::new("prelim")
-                        .default_x_bounds(0., d1 + d2)
-                        .default_y_bounds(0., *magnitude * 2.)
+                        .default_x_bounds(0., f64::max(d1 + d2, 1.))
+                        .default_y_bounds(miny, maxy)
                         .show(ui, |plot| {
                             plot.line(Line::new("const", PlotPoints::Borrowed(&points)));
                         });
                 }
-                Self::Impulse(ImpulseInput {delay, magnitude} ) => {
+                Self::Impulse(ImpulseInput { delay, magnitude }) => {
                     let d1 = delay.as_secs_f64();
+
+                    let maxx = f64::max(d1 * 2., 1.);
 
                     let pp1 = PlotPoint::new(0., 0.);
                     let pp2 = PlotPoint::new(d1, 0.);
                     let pp3 = PlotPoint::new(d1, *magnitude);
                     let pp4 = PlotPoint::new(d1, 0.);
-                    let pp5 = PlotPoint::new(d1 * 2., 0.);
+                    let pp5 = PlotPoint::new(maxx, 0.);
                     let points = [pp1, pp2, pp3, pp4, pp5];
 
+                    let (miny, maxy) = calc_y_bounds!(*magnitude * 2.);
+
                     egui_plot::Plot::new("prelim")
-                        .default_x_bounds(0., f64::max(d1 * 2., 1.))
-                        .default_y_bounds(0., *magnitude * 2.)
+                        .default_x_bounds(0., maxx)
+                        .default_y_bounds(miny, maxy)
                         .show(ui, |plot| {
                             plot.line(Line::new("const", PlotPoints::Borrowed(&points)));
                         });
@@ -726,16 +897,21 @@ impl eframe::App for AppState {
                     for (interface_name, network) in &self.network_ifs {
                         if ui.button(format!("[{interface_name}]")).clicked() {
                             match &self.ecat {
-                                Some(ChosenEcatNetwork { network_itf, .. }) if network_itf == interface_name => (),
-                                Some(ChosenEcatNetwork { ds402_tx, .. }) => {
+                                Some(ChosenEcatNetwork { network_itf, .. })
+                                    if network_itf == interface_name =>
+                                {
+                                    ()
                                 }
+                                Some(ChosenEcatNetwork { ds402_tx, .. }) => {}
                                 None => {
                                     let (main_tx, thread_rx) = std::sync::mpsc::channel();
                                     let (thread_tx, main_rx) = std::sync::mpsc::channel();
 
                                     let ifname = interface_name.to_owned();
                                     let handle = std::thread::spawn(|| {
-                                        motor_backend::ds402::event_loop(thread_rx, thread_tx, ifname);
+                                        motor_backend::ds402::event_loop(
+                                            thread_rx, thread_tx, ifname,
+                                        );
                                     });
 
                                     self.ecat = Some(ChosenEcatNetwork {
@@ -756,11 +932,12 @@ impl eframe::App for AppState {
             }
 
             while let Ok((rx_ip, msg)) = self.fourier_rx.try_recv() {
-                if let Some(motor) = self.motors.iter_mut().find(|m| {
-                    match m.backend {
-                        MotorUiBackendConfig::Fourier(motor_backend::fourier::MotorUiConfig {ip, ..}) => ip == Some(rx_ip),
-                        _ => false,
-                    }
+                if let Some(motor) = self.motors.iter_mut().find(|m| match m.backend {
+                    MotorUiBackendConfig::Fourier(motor_backend::fourier::MotorUiConfig {
+                        ip,
+                        ..
+                    }) => ip == Some(rx_ip),
+                    _ => false,
                 }) {
                     match msg {
                         FourierResponse::OutputCVP(cvp, time) => {
@@ -768,9 +945,7 @@ impl eframe::App for AppState {
                                 motor.output.push((cvp, time));
                             }
                         }
-                        FourierResponse::ControllerAdjustedCVP(_cvp, _time) => {
-
-                        }
+                        FourierResponse::ControllerAdjustedCVP(_cvp, _time) => {}
                         FourierResponse::EndWaveform => {
                             motor.ignore_motor_output = true;
                         }
@@ -786,11 +961,13 @@ impl eframe::App for AppState {
 
             if let Some(ds402_rx) = self.ecat.as_ref().map(|ecat| &ecat.ds402_rx) {
                 while let Ok((rx_idx, msg)) = ds402_rx.try_recv() {
-                    if let Some(motor) = self.motors.iter_mut().find(|m| {
-                        match m.backend {
-                            MotorUiBackendConfig::Ds402(motor_backend::ds402::MotorUiConfig {idx, added, ..}) => added && idx == Some(rx_idx),
-                            _ => false,
-                        }
+                    if let Some(motor) = self.motors.iter_mut().find(|m| match m.backend {
+                        MotorUiBackendConfig::Ds402(motor_backend::ds402::MotorUiConfig {
+                            idx,
+                            added,
+                            ..
+                        }) => added && idx == Some(rx_idx),
+                        _ => false,
                     }) {
                         match msg {
                             Ds402Response::OutputCVP(cvp, time) => {
@@ -798,9 +975,7 @@ impl eframe::App for AppState {
                                     motor.output.push((cvp, time));
                                 }
                             }
-                            Ds402Response::ControllerAdjustedCVP(_cvp, _time) => {
-
-                            }
+                            Ds402Response::ControllerAdjustedCVP(_cvp, _time) => {}
                             Ds402Response::EndWaveform => {
                                 motor.ignore_motor_output = true;
                             }
@@ -811,7 +986,12 @@ impl eframe::App for AppState {
             }
 
             for motor in &mut self.motors {
-                motor.display(&self.fourier_tx, self.ecat.as_ref().map(|ecat| &ecat.ds402_tx), ui, ctx)
+                motor.display(
+                    &self.fourier_tx,
+                    self.ecat.as_ref().map(|ecat| &ecat.ds402_tx),
+                    ui,
+                    ctx,
+                )
             }
         });
     }

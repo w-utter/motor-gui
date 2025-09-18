@@ -1,4 +1,4 @@
-use crate::controller::{Controller};
+use crate::controller::Controller;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ControlState {
