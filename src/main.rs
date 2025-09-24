@@ -12,6 +12,7 @@ fn main() -> eframe::Result {
 
 pub use motor_backend::ds402::{Ds402Cmd, Ds402Response};
 pub use motor_backend::fourier::{FourierCmd, FourierResponse};
+pub use motor_backend::protobuf::{ProtobufCmd, ProtobufResponse};
 
 struct AppState {
     motors: Vec<MotorUiConfig>,
@@ -21,6 +22,10 @@ struct AppState {
 
     network_ifs: sysinfo::Networks,
     ecat: Option<ChosenEcatNetwork>,
+
+    protobuf_tx: std::sync::mpsc::Sender<(String, ProtobufCmd)>,
+    protobuf_rx: std::sync::mpsc::Receiver<(String, ProtobufResponse)>,
+    _protobuf: std::thread::JoinHandle<std::io::Result<()>>,
 }
 
 struct ChosenEcatNetwork {
@@ -38,6 +43,12 @@ impl AppState {
         let fourier_handle =
             std::thread::spawn(|| motor_backend::fourier::event_loop(thread_rx, thread_tx));
 
+        let (protobuf_tx, thread_rx) = std::sync::mpsc::channel();
+        let (thread_tx, protobuf_rx) = std::sync::mpsc::channel();
+
+        let protobuf_handle =
+            std::thread::spawn(|| motor_backend::protobuf::event_loop(thread_rx, thread_tx));
+
         AppState {
             motors: vec![],
             _fourier: fourier_handle,
@@ -45,6 +56,9 @@ impl AppState {
             fourier_rx,
             network_ifs: sysinfo::Networks::new(),
             ecat: None,
+            protobuf_tx,
+            protobuf_rx,
+            _protobuf: protobuf_handle,
         }
     }
 }
@@ -205,6 +219,7 @@ impl MotorUiConfig {
         &mut self,
         fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>,
         ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>,
+        protobuf_tx: &std::sync::mpsc::Sender<(String, ProtobufCmd)>,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
     ) {
@@ -214,7 +229,7 @@ impl MotorUiConfig {
             .display(&mut self.control_state_cache, ui);
         changed |= self
             .backend
-            .display(fourier_tx, ds402_tx, &self.control_state, ui);
+            .display(fourier_tx, ds402_tx, protobuf_tx, &self.control_state, ui);
         ui.horizontal(|ui| {
             ui.label("gear reduction: ");
             if ui
@@ -261,6 +276,16 @@ impl MotorUiConfig {
                     if ui.button("stop").clicked() {
                         self.ignore_motor_output = true;
                         let _ = tx.send((idx, Ds402Cmd::StopWaveform));
+                    }
+                }
+            }
+            MotorUiBackendConfig::Protobuf(config) => {
+                if let Some(path) = config.path.as_ref() {
+                    if ui.button("send to motor").clicked() {
+                        self.output.clear();
+                        self.ignore_motor_output = false;
+                        let _ = protobuf_tx
+                            .send((path.clone(), ProtobufCmd::SetWaveForm(self.input.clone())));
                     }
                 }
             }
@@ -434,6 +459,7 @@ enum MotorUiBackendConfig {
     None,
     Fourier(motor_backend::fourier::MotorUiConfig),
     Ds402(motor_backend::ds402::MotorUiConfig),
+    Protobuf(motor_backend::protobuf::MotorUiConfig),
 }
 
 impl MotorUiBackendConfig {
@@ -441,6 +467,7 @@ impl MotorUiBackendConfig {
         &mut self,
         fourier_tx: &std::sync::mpsc::Sender<(Ipv4Addr, FourierCmd)>,
         ds402_tx: Option<&std::sync::mpsc::Sender<(usize, Ds402Cmd)>>,
+        protobuf_tx: &std::sync::mpsc::Sender<(String, ProtobufCmd)>,
         control_state: &ControlState,
         ui: &mut egui::Ui,
     ) -> bool {
@@ -465,6 +492,16 @@ impl MotorUiBackendConfig {
                 .clicked()
             {
                 *self = Self::Ds402(Default::default());
+            }
+
+            if ui
+                .add(egui::RadioButton::new(
+                    matches!(self, Self::Protobuf(_)),
+                    "protobuf",
+                ))
+                .clicked()
+            {
+                *self = Self::Protobuf(Default::default());
             }
         });
 
@@ -529,6 +566,44 @@ impl MotorUiBackendConfig {
                     false
                 }
             },
+            Self::Protobuf(config) => {
+                let changed = config.display(ui);
+
+                if let Some(path) = &config.path {
+                    if config.added {
+                        if ui.button("remove").clicked() {
+                            let _ = protobuf_tx.send((path.clone(), ProtobufCmd::Remove));
+                            config.added = false;
+                        }
+                    } else {
+                        if ui.button("add").clicked() {
+                            match motor_backend::protobuf::RawDevice::from_path(
+                                path,
+                                config.baud_rate,
+                            ) {
+                                Ok(dev) => {
+                                    let _ = protobuf_tx.send((
+                                        path.clone(),
+                                        ProtobufCmd::Add(
+                                            crate::motor_ctx::MotorConfig {
+                                                gear_reduction: 1.,
+                                                controller: None,
+                                                state: control_state.clone(),
+                                            },
+                                            dev,
+                                        ),
+                                    ));
+                                    println!("good");
+                                }
+                                Err(e) => println!("err: {e:?}"),
+                            }
+
+                            config.added = true;
+                        }
+                    }
+                }
+                changed
+            }
             _ => false,
         }
     }
@@ -985,10 +1060,39 @@ impl eframe::App for AppState {
                 }
             }
 
+            while let Ok((rx_path, msg)) = self.protobuf_rx.try_recv() {
+                if let Some(motor) = self.motors.iter_mut().find(|m| match &m.backend {
+                    MotorUiBackendConfig::Protobuf(motor_backend::protobuf::MotorUiConfig {
+                        path,
+                        ..
+                    }) => path.as_ref() == Some(&rx_path),
+                    _ => false,
+                }) {
+                    match msg {
+                        ProtobufResponse::OutputCVP(cvp, time) => {
+                            if !motor.ignore_motor_output {
+                                motor.output.push((cvp, time));
+                            }
+                        }
+                        ProtobufResponse::ControllerAdjustedCVP(_cvp, _time) => {}
+                        ProtobufResponse::EndWaveform => {
+                            motor.ignore_motor_output = true;
+                        }
+                        ProtobufResponse::Error(io) => {
+                            println!("io error: {io}");
+                        }
+                        msg => println!("received from protobuf: {msg:?}"),
+                    }
+                } else {
+                    println!("received from protobuf: {msg:?}");
+                }
+            }
+
             for motor in &mut self.motors {
                 motor.display(
                     &self.fourier_tx,
                     self.ecat.as_ref().map(|ecat| &ecat.ds402_tx),
+                    &self.protobuf_tx,
                     ui,
                     ctx,
                 )

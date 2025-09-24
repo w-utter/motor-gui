@@ -1,5 +1,6 @@
 pub(crate) mod ds402;
 pub(crate) mod fourier;
+pub(crate) mod protobuf;
 
 use crate::motor_ctx::MotorConfig;
 use std::time;

@@ -19,3 +19,9 @@ io-uring-buf-ring = {git = "https://github.com/w-utter/io-uring-buf-ring"}
 ecat = {git = "https://github.com/w-utter/ecat"}
 ethercrab = {git = "https://github.com/w-utter/ethercrab", branch = "io_uring-backend"}
 ethercrab-wire = {git = "https://github.com/w-utter/ethercrab", branch = "io_uring-backend"}
+
+protobuf = "3"
+
+[build-dependencies]
+protobuf-codegen = "3"
+protoc-rust = "2"

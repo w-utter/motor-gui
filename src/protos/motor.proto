@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+message MotorDriver {
+  oneof motor_cmd {
+    sint32 velocity = 1;
+  }
+}
+
+message MotorDriverResponse {
+  sint32 velocity = 1;
+  optional sint32 current = 2;
+  optional sint32 encoder_position = 3;
+  optional float encoder_velocity = 4;
+}
