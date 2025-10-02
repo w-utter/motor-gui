@@ -49,19 +49,20 @@ impl MotorUiConfig {
             if let Some(path) = &path {
                 ui.label(format!("current path: {path:?}"));
             }
-        });
 
-        ui.menu_button("baud rate", |ui| {
-            for rate in BaudRate::enumerate() {
-                if ui.button(format!("{:?}", rate)).clicked() {
-                    *baud_rate = Some(*rate)
+
+            ui.menu_button("baud rate", |ui| {
+                for rate in BaudRate::enumerate() {
+                    if ui.button(format!("{:?}", rate)).clicked() {
+                        *baud_rate = Some(*rate)
+                    }
                 }
+            });
+
+            if let Some(rate) = &baud_rate {
+                ui.label(format!("set baud rate: {:?}", rate));
             }
         });
-
-        if let Some(rate) = &self.baud_rate {
-            ui.label(format!("set baud rate: {:?}", rate));
-        }
 
         changed
     }
@@ -385,7 +386,35 @@ pub fn event_loop(
 
                 ring.submit().expect("could not submit ops");
             } else {
-                println!("err: {result}");
+                if matches!(-result, libc::EINTR) {
+                    use crate::motor_backend::protobuf::motor::motor_driver::Motor_cmd;
+                    use crate::motor_backend::protobuf::motor::MotorDriver;
+                    use protobuf::Message;
+
+                    let mut cmd = MotorDriver::new();
+                    cmd.motor_cmd = Some(Motor_cmd::Velocity(
+                        motor.input_cvp.unwrap_or_default().velocity.round() as _,
+                    ));
+
+                    let buf = cmd.write_to_bytes().unwrap();
+
+                    let write_entry = Write::new(
+                        types::Fd(motor.backend_specific.dev.as_raw_fd()),
+                        buf.as_ptr(),
+                        buf.len() as _,
+                    )
+                    .build()
+                    .user_data(motor.backend_specific.dev.as_raw_fd() as _)
+                    .flags(io_uring::squeue::Flags::SKIP_SUCCESS);
+
+                    while unsafe { ring.submission().push(&write_entry).is_err() } {
+                        ring.submit().expect("could not submit ops");
+                    }
+
+                    ring.submit().expect("could not submit ops");
+                } else {
+                    println!("err: {result}");
+                }
             }
         }
     }

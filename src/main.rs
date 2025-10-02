@@ -140,54 +140,62 @@ impl ControlState {
     fn display(&mut self, cache: &mut ControlStateCache, ui: &mut egui::Ui) -> bool {
         let prev = self.clone();
 
-        ui.radio_value(
-            self,
-            ControlState::Position {
-                show_velocity: cache.pos_ctrl_vel(),
-                show_torque: cache.pos_ctrl_i(),
-            },
-            "position",
-        );
-        ui.radio_value(
-            self,
-            ControlState::Velocity {
-                show_position: cache.vel_ctrl_pos(),
-                show_torque: cache.vel_ctrl_i(),
-            },
-            "velocity",
-        );
-        ui.radio_value(
-            self,
-            ControlState::Torque {
-                show_velocity: cache.i_ctrl_vel(),
-                show_position: cache.i_ctrl_pos(),
-            },
-            "torque",
-        );
+        ui.horizontal(|ui| {
+            ui.radio_value(
+                self,
+                ControlState::Position {
+                    show_velocity: cache.pos_ctrl_vel(),
+                    show_torque: cache.pos_ctrl_i(),
+                },
+                "position",
+            );
+            ui.radio_value(
+                self,
+                ControlState::Velocity {
+                    show_position: cache.vel_ctrl_pos(),
+                    show_torque: cache.vel_ctrl_i(),
+                },
+                "velocity",
+            );
+            ui.radio_value(
+                self,
+                ControlState::Torque {
+                    show_velocity: cache.i_ctrl_vel(),
+                    show_position: cache.i_ctrl_pos(),
+                },
+                "torque",
+            );
+        });
 
         match self {
             Self::Position {
                 show_velocity,
                 show_torque,
             } => {
-                ui.checkbox(show_velocity, "show velocity");
-                ui.checkbox(show_torque, "show torque");
+                ui.horizontal(|ui| {
+                    ui.checkbox(show_velocity, "show velocity");
+                    ui.checkbox(show_torque, "show torque");
+                });
                 cache.set_pos_ctrl(*show_velocity, *show_torque);
             }
             Self::Velocity {
                 show_position,
                 show_torque,
             } => {
-                ui.checkbox(show_position, "show position");
-                ui.checkbox(show_torque, "show torque");
+                ui.horizontal(|ui| {
+                    ui.checkbox(show_position, "show position");
+                    ui.checkbox(show_torque, "show torque");
+                });
                 cache.set_vel_ctrl(*show_position, *show_torque);
             }
             Self::Torque {
                 show_position,
                 show_velocity,
             } => {
-                ui.checkbox(show_position, "show position");
-                ui.checkbox(show_velocity, "show velocity");
+                ui.horizontal(|ui| {
+                    ui.checkbox(show_position, "show position");
+                    ui.checkbox(show_velocity, "show velocity");
+                });
                 cache.set_i_ctrl(*show_position, *show_velocity);
             }
         }
@@ -222,6 +230,7 @@ impl MotorUiConfig {
         protobuf_tx: &std::sync::mpsc::Sender<(String, ProtobufCmd)>,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
+        id: usize,
     ) {
         let mut changed = false;
         changed |= self
@@ -247,55 +256,61 @@ impl MotorUiConfig {
             ui.label(format!("current gear reduction: {}", self.gear_reduction));
         });
 
-        changed |= self.input.display_options(&mut self.input_cache, ui, ctx);
+        changed |= self.input.display_options(&mut self.input_cache, ui, ctx, id);
         let _changed = changed;
 
-        ui.vertical(|ui| match &self.backend {
-            MotorUiBackendConfig::Fourier(config) => {
-                if let Some(ip) = config.ip_addr() {
-                    if ui.button("send to motor").clicked() {
-                        self.output.clear();
-                        self.ignore_motor_output = false;
-                        let _ = fourier_tx.send((ip, FourierCmd::SetWaveForm(self.input.clone())));
-                    }
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| match &self.backend {
+                MotorUiBackendConfig::Fourier(config) => {
+                    if let Some(ip) = config.ip_addr() {
+                        if ui.button("send to motor").clicked() {
+                            self.output.clear();
+                            self.ignore_motor_output = false;
+                            let _ = fourier_tx.send((ip, FourierCmd::SetWaveForm(self.input.clone())));
+                        }
 
-                    if ui.button("stop").clicked() {
-                        self.ignore_motor_output = true;
-                        let _ = fourier_tx.send((ip, FourierCmd::StopWaveform));
+                        if ui.button("stop").clicked() {
+                            self.ignore_motor_output = true;
+                            let _ = fourier_tx.send((ip, FourierCmd::StopWaveform));
+                        }
                     }
                 }
-            }
-            MotorUiBackendConfig::Ds402(config) => {
-                if let (Some(tx), Some(idx)) = (ds402_tx, config.idx) {
-                    if ui.button("send to motor").clicked() {
-                        self.output.clear();
-                        self.ignore_motor_output = false;
-                        let _ = tx.send((idx, Ds402Cmd::SetWaveForm(self.input.clone())));
-                    }
+                MotorUiBackendConfig::Ds402(config) => {
+                    if let (Some(tx), Some(idx)) = (ds402_tx, config.idx) {
+                        if ui.button("send to motor").clicked() {
+                            self.output.clear();
+                            self.ignore_motor_output = false;
+                            let _ = tx.send((idx, Ds402Cmd::SetWaveForm(self.input.clone())));
+                        }
 
-                    if ui.button("stop").clicked() {
-                        self.ignore_motor_output = true;
-                        let _ = tx.send((idx, Ds402Cmd::StopWaveform));
+                        if ui.button("stop").clicked() {
+                            self.ignore_motor_output = true;
+                            let _ = tx.send((idx, Ds402Cmd::StopWaveform));
+                        }
                     }
                 }
-            }
-            MotorUiBackendConfig::Protobuf(config) => {
-                if let Some(path) = config.path.as_ref() {
-                    if ui.button("send to motor").clicked() {
-                        self.output.clear();
-                        self.ignore_motor_output = false;
-                        let _ = protobuf_tx
-                            .send((path.clone(), ProtobufCmd::SetWaveForm(self.input.clone())));
+                MotorUiBackendConfig::Protobuf(config) => {
+                    if let Some(path) = config.path.as_ref() {
+                        if ui.button("send to motor").clicked() {
+                            self.output.clear();
+                            self.ignore_motor_output = false;
+                            let _ = protobuf_tx
+                                .send((path.clone(), ProtobufCmd::SetWaveForm(self.input.clone())));
+                        }
                     }
                 }
+                _ => (),
+            });
+
+            if ui.button("reset start time").clicked() {
+                //self.start_instant = std::time::Instant::now();
+                self.output.clear();
             }
-            _ => (),
         });
-
-        self.display_output_graph(ui, ctx)
+        self.display_output_graph(ui, ctx, id)
     }
 
-    fn display_output_graph(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn display_output_graph(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, id: usize) {
         let first_time = self
             .output
             .first()
@@ -305,7 +320,7 @@ impl MotorUiConfig {
         let contents = vec![];
         let mut writer = csv::Writer::from_writer(contents);
 
-        egui::Window::new("output window").show(ctx, |ui| {
+        egui::Window::new(&format!("output window {id}")).show(ctx, |ui| {
             ui.vertical(|ui| {
                 use egui_plot::{Line, PlotPoint, PlotPoints};
 
@@ -356,7 +371,7 @@ impl MotorUiConfig {
                 ..
             }
         ) {
-            egui::Window::new("output window pos").show(ctx, |ui| {
+            egui::Window::new(&format!("output window pos {id}")).show(ctx, |ui| {
                 ui.vertical(|ui| {
                     use egui_plot::{Line, PlotPoint, PlotPoints};
 
@@ -405,7 +420,7 @@ impl MotorUiConfig {
                 ..
             }
         ) {
-            egui::Window::new("output window current").show(ctx, |ui| {
+            egui::Window::new(&format!("output window current {id}")).show(ctx, |ui| {
                 ui.vertical(|ui| {
                     use egui_plot::{Line, PlotPoint, PlotPoints};
 
@@ -444,10 +459,6 @@ impl MotorUiConfig {
             });
         }
 
-        if ui.button("reset start time").clicked() {
-            //self.start_instant = std::time::Instant::now();
-            self.output.clear();
-        }
     }
 }
 
@@ -688,96 +699,102 @@ impl MotorInput {
         cache: &mut MotorInputCache,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
+        id: usize,
     ) -> bool {
         let mut changed = false;
-        if ui
-            .add(egui::RadioButton::new(matches!(self, Self::Idle), "idle"))
-            .clicked()
-        {
-            self.move_prev_input(Self::Idle, cache);
-            changed = true;
-        }
 
-        if ui
-            .add(egui::RadioButton::new(
-                matches!(self, Self::Constant(_)),
-                "constant",
-            ))
-            .clicked()
-        {
-            if !matches!(self, Self::Constant(_)) {
-                if let Some(cached) = core::mem::take(&mut cache.constant) {
-                    self.move_prev_input(Self::Constant(cached), cache);
-                } else {
-                    self.move_prev_input(Self::Constant(1.), cache);
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::RadioButton::new(matches!(self, Self::Idle), "idle"))
+                .clicked()
+            {
+                self.move_prev_input(Self::Idle, cache);
+                changed = true;
+            }
+
+            if ui
+                .add(egui::RadioButton::new(
+                    matches!(self, Self::Constant(_)),
+                    "constant",
+                ))
+                .clicked()
+            {
+                if !matches!(self, Self::Constant(_)) {
+                    if let Some(cached) = core::mem::take(&mut cache.constant) {
+                        self.move_prev_input(Self::Constant(cached), cache);
+                    } else {
+                        self.move_prev_input(Self::Constant(1.), cache);
+                    }
+                    changed = true;
                 }
-                changed = true;
             }
-        }
 
-        if ui
-            .add(egui::RadioButton::new(
-                matches!(self, Self::Step(_)),
-                "step",
-            ))
-            .clicked()
-        {
-            if !matches!(self, Self::Step(_)) {
-                if let Some(cached) = core::mem::take(&mut cache.step) {
-                    self.move_prev_input(Self::Step(cached), cache);
-                } else {
-                    self.move_prev_input(Self::Step(Default::default()), cache);
+            if ui
+                .add(egui::RadioButton::new(
+                    matches!(self, Self::Step(_)),
+                    "step",
+                ))
+                .clicked()
+            {
+                if !matches!(self, Self::Step(_)) {
+                    if let Some(cached) = core::mem::take(&mut cache.step) {
+                        self.move_prev_input(Self::Step(cached), cache);
+                    } else {
+                        self.move_prev_input(Self::Step(Default::default()), cache);
+                    }
+                    changed = true;
                 }
-                changed = true;
             }
-        }
 
-        if ui
-            .add(egui::RadioButton::new(
-                matches!(self, Self::Impulse(_)),
-                "impulse",
-            ))
-            .clicked()
-        {
-            if !matches!(self, Self::Impulse(_)) {
-                if let Some(cached) = core::mem::take(&mut cache.impulse) {
-                    self.move_prev_input(Self::Impulse(cached), cache);
-                } else {
-                    self.move_prev_input(Self::Impulse(Default::default()), cache);
+            if ui
+                .add(egui::RadioButton::new(
+                    matches!(self, Self::Impulse(_)),
+                    "impulse",
+                ))
+                .clicked()
+            {
+                if !matches!(self, Self::Impulse(_)) {
+                    if let Some(cached) = core::mem::take(&mut cache.impulse) {
+                        self.move_prev_input(Self::Impulse(cached), cache);
+                    } else {
+                        self.move_prev_input(Self::Impulse(Default::default()), cache);
+                    }
+                    changed = true;
                 }
-                changed = true;
             }
-        }
 
-        if ui
-            .add(egui::RadioButton::new(
-                matches!(self, Self::Custom(_)),
-                "custom",
-            ))
-            .clicked()
-        {
-            if !matches!(self, Self::Custom(_)) {
-                let cached = core::mem::take(&mut cache.custom);
-                self.move_prev_input(Self::Custom(cached), cache);
-                changed = true;
+            if ui
+                .add(egui::RadioButton::new(
+                    matches!(self, Self::Custom(_)),
+                    "custom",
+                ))
+                .clicked()
+            {
+                if !matches!(self, Self::Custom(_)) {
+                    let cached = core::mem::take(&mut cache.custom);
+                    self.move_prev_input(Self::Custom(cached), cache);
+                    changed = true;
+                }
             }
-        }
+        });
 
         match self {
             Self::Idle => (),
             Self::Constant(c) => {
-                ui.label("magnitude:");
-                if ui.text_edit_singleline(&mut cache.const_storage).changed() {
-                    match cache.const_storage.parse::<f64>() {
-                        Ok(new_const) if new_const != *c => {
-                            *c = new_const;
-                            changed = true;
-                            //TODO propagate changes to driver
+                ui.horizontal(|ui| {
+                    ui.label("magnitude:");
+                    if ui.text_edit_singleline(&mut cache.const_storage).changed() {
+                        match cache.const_storage.parse::<f64>() {
+                            Ok(new_const) if new_const != *c => {
+                                *c = new_const;
+                                changed = true;
+                                //TODO propagate changes to driver
+                            }
+                            _ => (),
                         }
-                        _ => (),
                     }
-                }
-                ui.label(format!("current magnitude: {}", c));
+                    ui.label(format!("current magnitude: {}", c));
+                });
             }
             Self::Step(StepInput {
                 delay,
@@ -873,17 +890,17 @@ impl MotorInput {
             }
             _ => (),
         }
-        self.display_prelim_graph(ctx);
+        self.display_prelim_graph(ctx, id);
 
         changed
     }
 
-    fn display_prelim_graph(&mut self, ctx: &egui::Context) {
+    fn display_prelim_graph(&mut self, ctx: &egui::Context, id: usize) {
         if matches!(self, Self::Idle) {
             return;
         }
 
-        egui::Window::new("input window").show(ctx, |ui| {
+        egui::Window::new(&format!("input window {id}")).show(ctx, |ui| {
             use egui_plot::{Line, PlotPoint, PlotPoints};
             match self {
                 Self::Constant(c) => {
@@ -965,138 +982,144 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
         egui::TopBottomPanel::top("top pannel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.menu_button("ecat interface", |ui| {
-                    self.network_ifs.refresh(true);
+            //egui::ScrollArea::both().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("ecat interface", |ui| {
+                        self.network_ifs.refresh(true);
 
-                    for (interface_name, network) in &self.network_ifs {
-                        if ui.button(format!("[{interface_name}]")).clicked() {
-                            match &self.ecat {
-                                Some(ChosenEcatNetwork { network_itf, .. })
-                                    if network_itf == interface_name =>
-                                {
-                                    ()
-                                }
-                                Some(ChosenEcatNetwork { ds402_tx, .. }) => {}
-                                None => {
-                                    let (main_tx, thread_rx) = std::sync::mpsc::channel();
-                                    let (thread_tx, main_rx) = std::sync::mpsc::channel();
+                        for (interface_name, network) in &self.network_ifs {
+                            if ui.button(format!("[{interface_name}]")).clicked() {
+                                match &self.ecat {
+                                    Some(ChosenEcatNetwork { network_itf, .. })
+                                        if network_itf == interface_name =>
+                                    {
+                                        ()
+                                    }
+                                    Some(ChosenEcatNetwork { ds402_tx, .. }) => {}
+                                    None => {
+                                        let (main_tx, thread_rx) = std::sync::mpsc::channel();
+                                        let (thread_tx, main_rx) = std::sync::mpsc::channel();
 
-                                    let ifname = interface_name.to_owned();
-                                    let handle = std::thread::spawn(|| {
-                                        motor_backend::ds402::event_loop(
-                                            thread_rx, thread_tx, ifname,
-                                        );
-                                    });
+                                        let ifname = interface_name.to_owned();
+                                        let handle = std::thread::spawn(|| {
+                                            motor_backend::ds402::event_loop(
+                                                thread_rx, thread_tx, ifname,
+                                            );
+                                        });
 
-                                    self.ecat = Some(ChosenEcatNetwork {
-                                        ds402_tx: main_tx,
-                                        ds402_rx: main_rx,
-                                        network_itf: interface_name.to_owned(),
-                                        driver: handle,
-                                    });
+                                        self.ecat = Some(ChosenEcatNetwork {
+                                            ds402_tx: main_tx,
+                                            ds402_rx: main_rx,
+                                            network_itf: interface_name.to_owned(),
+                                            driver: handle,
+                                        });
+                                    }
                                 }
                             }
                         }
-                    }
+                    });
                 });
-            });
 
-            if ui.button("add motor").clicked() {
-                self.motors.push(MotorUiConfig::new())
-            }
-
-            while let Ok((rx_ip, msg)) = self.fourier_rx.try_recv() {
-                if let Some(motor) = self.motors.iter_mut().find(|m| match m.backend {
-                    MotorUiBackendConfig::Fourier(motor_backend::fourier::MotorUiConfig {
-                        ip,
-                        ..
-                    }) => ip == Some(rx_ip),
-                    _ => false,
-                }) {
-                    match msg {
-                        FourierResponse::OutputCVP(cvp, time) => {
-                            if !motor.ignore_motor_output {
-                                motor.output.push((cvp, time));
-                            }
-                        }
-                        FourierResponse::ControllerAdjustedCVP(_cvp, _time) => {}
-                        FourierResponse::EndWaveform => {
-                            motor.ignore_motor_output = true;
-                        }
-                        FourierResponse::Error(io) => {
-                            println!("io error: {io}");
-                        }
-                        msg => println!("received from fourier: {msg:?}"),
-                    }
-                } else {
-                    println!("received from fourier: {msg:?}");
+                if ui.button("add motor").clicked() {
+                    self.motors.push(MotorUiConfig::new())
                 }
-            }
 
-            if let Some(ds402_rx) = self.ecat.as_ref().map(|ecat| &ecat.ds402_rx) {
-                while let Ok((rx_idx, msg)) = ds402_rx.try_recv() {
+                while let Ok((rx_ip, msg)) = self.fourier_rx.try_recv() {
                     if let Some(motor) = self.motors.iter_mut().find(|m| match m.backend {
-                        MotorUiBackendConfig::Ds402(motor_backend::ds402::MotorUiConfig {
-                            idx,
-                            added,
+                        MotorUiBackendConfig::Fourier(motor_backend::fourier::MotorUiConfig {
+                            ip,
                             ..
-                        }) => added && idx == Some(rx_idx),
+                        }) => ip == Some(rx_ip),
                         _ => false,
                     }) {
                         match msg {
-                            Ds402Response::OutputCVP(cvp, time) => {
+                            FourierResponse::OutputCVP(cvp, time) => {
                                 if !motor.ignore_motor_output {
                                     motor.output.push((cvp, time));
                                 }
                             }
-                            Ds402Response::ControllerAdjustedCVP(_cvp, _time) => {}
-                            Ds402Response::EndWaveform => {
+                            FourierResponse::ControllerAdjustedCVP(_cvp, _time) => {}
+                            FourierResponse::EndWaveform => {
                                 motor.ignore_motor_output = true;
+                            }
+                            FourierResponse::Error(io) => {
+                                println!("io error: {io}");
                             }
                             msg => println!("received from fourier: {msg:?}"),
                         }
+                    } else {
+                        println!("received from fourier: {msg:?}");
                     }
                 }
-            }
 
-            while let Ok((rx_path, msg)) = self.protobuf_rx.try_recv() {
-                if let Some(motor) = self.motors.iter_mut().find(|m| match &m.backend {
-                    MotorUiBackendConfig::Protobuf(motor_backend::protobuf::MotorUiConfig {
-                        path,
-                        ..
-                    }) => path.as_ref() == Some(&rx_path),
-                    _ => false,
-                }) {
-                    match msg {
-                        ProtobufResponse::OutputCVP(cvp, time) => {
-                            if !motor.ignore_motor_output {
-                                motor.output.push((cvp, time));
+                if let Some(ds402_rx) = self.ecat.as_ref().map(|ecat| &ecat.ds402_rx) {
+                    while let Ok((rx_idx, msg)) = ds402_rx.try_recv() {
+                        if let Some(motor) = self.motors.iter_mut().find(|m| match m.backend {
+                            MotorUiBackendConfig::Ds402(motor_backend::ds402::MotorUiConfig {
+                                idx,
+                                added,
+                                ..
+                            }) => added && idx == Some(rx_idx),
+                            _ => false,
+                        }) {
+                            match msg {
+                                Ds402Response::OutputCVP(cvp, time) => {
+                                    if !motor.ignore_motor_output {
+                                        motor.output.push((cvp, time));
+                                    }
+                                }
+                                Ds402Response::ControllerAdjustedCVP(_cvp, _time) => {}
+                                Ds402Response::EndWaveform => {
+                                    motor.ignore_motor_output = true;
+                                }
+                                msg => println!("received from fourier: {msg:?}"),
                             }
                         }
-                        ProtobufResponse::ControllerAdjustedCVP(_cvp, _time) => {}
-                        ProtobufResponse::EndWaveform => {
-                            motor.ignore_motor_output = true;
-                        }
-                        ProtobufResponse::Error(io) => {
-                            println!("io error: {io}");
-                        }
-                        msg => println!("received from protobuf: {msg:?}"),
                     }
-                } else {
-                    println!("received from protobuf: {msg:?}");
                 }
-            }
 
-            for motor in &mut self.motors {
-                motor.display(
-                    &self.fourier_tx,
-                    self.ecat.as_ref().map(|ecat| &ecat.ds402_tx),
-                    &self.protobuf_tx,
-                    ui,
-                    ctx,
-                )
-            }
+                while let Ok((rx_path, msg)) = self.protobuf_rx.try_recv() {
+                    if let Some(motor) = self.motors.iter_mut().find(|m| match &m.backend {
+                        MotorUiBackendConfig::Protobuf(motor_backend::protobuf::MotorUiConfig {
+                            path,
+                            ..
+                        }) => path.as_ref() == Some(&rx_path),
+                        _ => false,
+                    }) {
+                        match msg {
+                            ProtobufResponse::OutputCVP(cvp, time) => {
+                                if !motor.ignore_motor_output {
+                                    motor.output.push((cvp, time));
+                                }
+                            }
+                            ProtobufResponse::ControllerAdjustedCVP(_cvp, _time) => {}
+                            ProtobufResponse::EndWaveform => {
+                                motor.ignore_motor_output = true;
+                            }
+                            ProtobufResponse::Error(io) => {
+                                println!("io error: {io}");
+                            }
+                            msg => println!("received from protobuf: {msg:?}"),
+                        }
+                    } else {
+                        println!("received from protobuf: {msg:?}");
+                    }
+                }
+
+
+                ui.vertical(|ui| {
+                    for (id, motor) in &mut self.motors.iter_mut().enumerate() {
+                        motor.display(
+                            &self.fourier_tx,
+                            self.ecat.as_ref().map(|ecat| &ecat.ds402_tx),
+                            &self.protobuf_tx,
+                            ui,
+                            ctx,
+                            id,
+                        )
+                    }
+                });
+            //});
         });
     }
 }
