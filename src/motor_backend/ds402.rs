@@ -84,7 +84,9 @@ pub(crate) fn event_loop(
     //TODO: update to actual timeout duration.
     let timeout = Timespec::new().sec(1);
 
-    let mut state = InitState::<16, UserState>::new();
+    let mut state = InitState::<16, _, _, _>::new();
+
+    let write_entry = |id| id | WRITE_MASK;
 
     state.start(
         &maindevice,
@@ -93,6 +95,7 @@ pub(crate) fn event_loop(
         &mut tx_bufs,
         &sock,
         &mut ring,
+        &write_entry,
     )?;
 
     let mut pdi_offset = ethercrab::PdiOffset::default();
@@ -157,15 +160,36 @@ pub(crate) fn event_loop(
                         res.configured_addr,
                         res.identifier,
                         &mut pdi_offset,
-                        |_| &config,
+                        |_, subdev| (User::new(subdev), &config),
+                        |maindev, dev, received, entries, ring, index, identifier, output_buf| {
+                            let flow = dev
+                                .update(
+                                    received,
+                                    maindev,
+                                    retries,
+                                    &timeout,
+                                    entries,
+                                    &sock,
+                                    ring,
+                                    index,
+                                    identifier,
+                                    output_buf,
+                                    &write_entry,
+                                    &err_tx,
+                                )
+                                .unwrap();
+                            Ok(flow)
+                        },
+                        /*
                         |maindev, subdev, state, received, entries, ring, index, identifier| {
                             ready = true;
-                            let _ = state.update(
+                            state.update(
                                 received, maindev, retries, &timeout, entries, &sock, ring, subdev,
                                 index, identifier, &err_tx,
-                            );
-                            Ok(())
+                            )?
                         },
+                        */
+                        &write_entry,
                     );
                 } else {
                     println!("actually timed out");
@@ -243,9 +267,9 @@ pub(crate) fn event_loop(
             while let Ok((idx, cmd)) = cmd_rx.try_recv() {
                 match cmd {
                     Ds402Cmd::Add(cfg) => {
-                        if let Some((motor, state)) = {
+                        if let Some(User { device: motor, state }) = {
                             match &mut state {
-                                InitState::Op(d) => d.subdev_mut(idx),
+                                InitState::Op(d, _) => d.subdev_mut(idx),
                                 _ => unreachable!(),
                             }
                         } {
@@ -265,9 +289,9 @@ pub(crate) fn event_loop(
                         }
                     }
                     Ds402Cmd::SetWaveForm(waveform) => {
-                        if let Some((motor, state)) = {
+                        if let Some(User { device: motor, state }) = {
                             match &mut state {
-                                InitState::Op(d) => d.subdev_mut(idx),
+                                InitState::Op(d, _) => d.subdev_mut(idx),
                                 _ => unreachable!(),
                             }
                         } {
@@ -351,9 +375,9 @@ pub(crate) fn event_loop(
                         }
                     }
                     Ds402Cmd::StopWaveform => {
-                        if let Some((motor, state)) = {
+                        if let Some(User { device: motor, state }) = {
                             match &mut state {
-                                InitState::Op(d) => d.subdev_mut(idx),
+                                InitState::Op(d, _) => d.subdev_mut(idx),
                                 _ => unreachable!(),
                             }
                         } {
@@ -375,17 +399,8 @@ pub(crate) fn event_loop(
 enum UserState {
     #[default]
     Idle,
-    //Init(UserControlInit),
+    Init(u32),
     Test(u32, Option<Backend<Ds402Backend>>),
-}
-
-pub enum UserControlInitState {
-    // | operation mode related parameters
-    MaxVelocity(SdoWrite<u32>),
-    MaxAcceleration(SdoWrite<u32>),
-    QuickStopDecel(SdoWrite<u32>),
-    ProfileDecel(SdoWrite<u32>),
-    // |
 }
 
 #[derive(Copy, Clone, ethercrab_wire::EtherCrabWireRead)]
@@ -399,6 +414,10 @@ struct RecvObj {
     velocity: i32,
     #[wire(bytes = 2)]
     torque: i16,
+}
+
+impl RecvObj {
+    const ERR_MASK: u16 = 0x08;
 }
 
 #[derive(Copy, Clone, ethercrab_wire::EtherCrabWireWrite)]
@@ -440,20 +459,26 @@ impl core::fmt::Debug for RecvObj {
 impl UserState {
     fn update(
         &mut self,
-        received: Option<(ReceivedPdu<'_>, PduHeader)>,
+        received: Option<ecat::DeviceResponse<'_, '_>>,
         maindevice: &MainDevice,
         retry_count: usize,
         timeout_duration: &Timespec,
         tx_entries: &mut BTreeMap<u64, TxBuf>,
         sock: &RawSocketDesc,
         ring: &mut io_uring::IoUring,
-        _subdev: &mut SubDevice,
+        subdev: &mut SubDevice,
         idx: u16,
-        _identifier: Option<u8>,
+        identifier: Option<u8>,
+        output_buf: &mut [u8],
+        write_entry: impl Fn(u64) -> u64,
         err_tx: &mpsc::Sender<(usize, Ds402Response)>,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<ControlFlow>, Error> {
+        use ethercrab::{EtherCrabWireWrite, EtherCrabWireRead};
         match self {
             Self::Idle => {
+                if received.is_some() {
+                    return Ok(None);
+                }
                 println!("attempting to start rx/tx");
 
                 let mut buf = [0; 20];
@@ -463,7 +488,6 @@ impl UserState {
 
                 println!("send: {buf:?}");
 
-                // lmao no way thats all it is
                 let (frame, handle) = unsafe { maindevice.prep_rx_tx(0, &buf).unwrap().unwrap() };
                 ecat::setup::setup_write(
                     frame,
@@ -475,26 +499,49 @@ impl UserState {
                     ring,
                     Some(idx),
                     None,
+                    write_entry,
                 )?;
 
-                *self = Self::Test(0, None);
+                *self = Self::Init(0);
+            }
+            Self::Init(step) => {
+                let Some(ecat::DeviceResponse::Pdi(recv_bytes)) = received else {
+                    return Ok(None)
+                };
 
-                // TODO: bring this back once testing tx/rx loop
-                /*
-                let mut ctrl = UserControlInit::new(subdev, 9);
-                ctrl.start(maindevice, retry_count, timeout_duration, tx_entries, sock, ring, subdev, idx);
+                let recv = RecvObj::unpack_from_slice(recv_bytes).unwrap();
 
-                *self = Self::Init(ctrl);
-                */
+                //restart the motors if they are not in the correct state
+                if (*step > 1500 && recv.status & RecvObj::ERR_MASK == RecvObj::ERR_MASK) || (*step > 3500 && recv.status != 0x1637) {
+                    return Ok(Some(ControlFlow::Restart))
+                }
+
+                let step = *step;
+                let ctrl = if step < 500 {
+                    0x0080
+                } else if step < 1500 {
+                    0x0006
+                } else if step < 2500 {
+                    0x0007
+                } else if step < 3500 {
+                    0x000F
+                } else {
+                    0x000F
+                };
+                let write_obj = WriteObj::new(ctrl, 0, 9);
+                write_obj.pack_to_slice(output_buf)?;
+
+                if step > 5000 {
+                    *self = Self::Test(step, None);
+                }
             }
             Self::Test(step, backend) => {
-                if *step < 10000 {
-                    *step += 1;
-                }
-                let (received, _header) = received.unwrap();
+                let Some(ecat::DeviceResponse::Pdi(recv_bytes)) = received else {
+                    return Ok(None)
+                };
 
-                use ethercrab::EtherCrabWireRead;
-                let recv = RecvObj::unpack_from_slice(&*received).unwrap();
+
+                let recv = RecvObj::unpack_from_slice(recv_bytes).unwrap();
 
                 let out_cvp = crate::motor_ctx::CVP {
                     current: recv.torque as _,
@@ -507,53 +554,21 @@ impl UserState {
                     Ds402Response::OutputCVP(out_cvp, time::Instant::now()),
                 ));
 
-                //TODO: motor output needs to be sent to the gui
-                //let _ = err_tx.send((ip, FourierResponse::OutputCVP(cvp, time::Instant::now())));
-                println!("step {step} state: {:?}", recv);
-
-                let step = *step;
-                let (ctrl, velocity) = if step < 1000 {
-                    (0x0080, 0)
-                } else if step < 1500 {
-                    (0x0006, 0)
-                } else if step < 2000 {
-                    (0x0007, 0)
-                } else if step < 2500 {
-                    (0x000F, 0)
+                let vel = if let Some(backend) = backend {
+                    backend.update_input(err_tx, idx as _);
+                    let input = backend.input_cvp.unwrap_or_default();
+                    input.velocity.round() as i32
                 } else {
-                    let vel = if let Some(backend) = backend {
-                        backend.update_input(err_tx, idx as _);
-                        let input = backend.input_cvp.unwrap_or_default();
-                        input.velocity.round() as i32
-                    } else {
-                        0
-                    };
-
-                    println!("velocity input: {vel:?}");
-
-                    (0x000F, vel)
+                    0
                 };
 
-                let mut buf = [0; 20];
-                use ethercrab::EtherCrabWireWrite;
-                let write_obj = WriteObj::new(ctrl, velocity, 9);
-                write_obj.pack_to_slice(&mut buf[12..]).unwrap();
+                println!("velocity input: {vel:?}");
 
-                let (frame, handle) = unsafe { maindevice.prep_rx_tx(0, &buf).unwrap().unwrap() };
-                ecat::setup::setup_write(
-                    frame,
-                    handle,
-                    retry_count,
-                    timeout_duration,
-                    tx_entries,
-                    sock,
-                    ring,
-                    Some(idx),
-                    None,
-                )?;
+                let write_obj = WriteObj::new(0x000F, vel, 9);
+                write_obj.pack_to_slice(output_buf).unwrap();
             }
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -702,5 +717,68 @@ impl Backend<Ds402Backend> {
         };
 
         self.input_cvp = next_input;
+    }
+}
+
+use ecat::user::ControlFlow;
+
+struct User {
+    device: ethercrab::SubDevice,
+    state: UserState,
+}
+
+impl User {
+    fn new(device: ethercrab::SubDevice) -> Self {
+        Self {
+            device,
+            state: Default::default(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update(
+        &mut self,
+        received: Option<ecat::DeviceResponse<'_, '_>>,
+        maindevice: &MainDevice,
+        retry_count: usize,
+        timeout_duration: &Timespec,
+        tx_entries: &mut BTreeMap<u64, TxBuf>,
+        sock: &RawSocketDesc,
+        ring: &mut io_uring::IoUring,
+        idx: u16,
+        identifier: Option<u8>,
+        output_buf: &mut [u8],
+        write_entry: impl Fn(u64) -> u64,
+        err_tx: &mpsc::Sender<(usize, Ds402Response)>,
+    ) -> Result<Option<ControlFlow>, Error> {
+        self.state.update(
+            received,
+            maindevice,
+            retry_count,
+            timeout_duration,
+            tx_entries,
+            sock,
+            ring,
+            &mut self.device,
+            idx,
+            identifier,
+            output_buf,
+            write_entry,
+            err_tx,
+        )
+    }
+}
+
+impl ecat::user::UserDevice for User {
+    fn subdevice(&self) -> &ethercrab::SubDevice {
+        &self.device
+    }
+
+    fn subdevice_mut(&mut self) -> &mut ethercrab::SubDevice {
+        &mut self.device
+    }
+
+    fn into_subdevice(self) -> ethercrab::SubDevice {
+        self.device
     }
 }

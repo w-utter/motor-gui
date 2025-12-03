@@ -297,6 +297,11 @@ impl MotorUiConfig {
                             let _ = protobuf_tx
                                 .send((path.clone(), ProtobufCmd::SetWaveForm(self.input.clone())));
                         }
+
+                        if ui.button("stop").clicked() {
+                            self.ignore_motor_output = true;
+                            let _ = protobuf_tx.send((path.clone(), ProtobufCmd::StopWaveform));
+                        }
                     }
                 }
                 _ => (),
@@ -343,10 +348,7 @@ impl MotorUiConfig {
 
                     let time = chrono::Utc::now().to_rfc3339();
                     if let Ok(mut file) = std::fs::File::create(format!(
-                        "{}/velocity-graph-{time}.csv",
-                        std::env::home_dir()
-                            .unwrap_or(std::path::PathBuf::from("/"))
-                            .display()
+                        "velocity-graph-{time}.csv",
                     )) {
                         let mut buf = writer.into_inner().unwrap();
                         use std::io::Write;
@@ -355,7 +357,10 @@ impl MotorUiConfig {
                     }
                 }
 
-                egui_plot::Plot::new("output").show(ui, |plot| {
+                egui_plot::Plot::new("output")
+                    .allow_zoom(egui::Vec2b::new(true, true))
+                    .allow_scroll(egui::Vec2b::new(false, false))
+                    .show(ui, |plot| {
                     plot.line(Line::new("vel", PlotPoints::Owned(main_points)));
                 });
             });
@@ -403,7 +408,10 @@ impl MotorUiConfig {
                         }
                     }
 
-                    egui_plot::Plot::new("output").show(ui, |plot| {
+                    egui_plot::Plot::new("output")
+                        .allow_zoom(egui::Vec2b::new(true, true))
+                        .allow_scroll(egui::Vec2b::new(false, false))
+                        .show(ui, |plot| {
                         plot.line(Line::new("pos", PlotPoints::Owned(sub_points_1)));
                     })
                 })
@@ -452,7 +460,10 @@ impl MotorUiConfig {
                         }
                     }
 
-                    egui_plot::Plot::new("output").show(ui, |plot| {
+                    egui_plot::Plot::new("output")
+                        .allow_zoom(egui::Vec2b::new(true, true))
+                        .allow_scroll(egui::Vec2b::new(false, false))
+                        .show(ui, |plot| {
                         plot.line(Line::new("current", PlotPoints::Owned(sub_points_2)));
                     })
                 })
