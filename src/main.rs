@@ -260,7 +260,7 @@ impl MotorUiConfig {
         let _changed = changed;
 
         ui.horizontal(|ui| {
-            ui.vertical(|ui| match &self.backend {
+            ui.vertical(|ui| match &mut self.backend {
                 MotorUiBackendConfig::Fourier(config) => {
                     if let Some(ip) = config.ip_addr() {
                         if ui.button("send to motor").clicked() {
@@ -290,7 +290,7 @@ impl MotorUiConfig {
                     }
                 }
                 MotorUiBackendConfig::Protobuf(config) => {
-                    if let Some(path) = config.path.as_ref() {
+                    if let Some(path) = config.path.as_mut() {
                         if ui.button("send to motor").clicked() {
                             self.output.clear();
                             self.ignore_motor_output = false;
@@ -301,6 +301,11 @@ impl MotorUiConfig {
                         if ui.button("stop").clicked() {
                             self.ignore_motor_output = true;
                             let _ = protobuf_tx.send((path.clone(), ProtobufCmd::StopWaveform));
+                        }
+
+                        if core::mem::take(&mut config.send_controller_config) {
+                            let _ = protobuf_tx.send((path.clone(), ProtobufCmd::SetController(config.controller.clone())));
+                            
                         }
                     }
                 }

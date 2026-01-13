@@ -1,8 +1,18 @@
 syntax = "proto3";
 
+message Empty {}
+
+message PidGains {
+  float kp = 1;
+  float ki = 2;
+  float kd = 3;
+}
+
 message MotorDriver {
   oneof motor_cmd {
     sint32 velocity = 1;
+	Empty set_open_loop = 2;
+    PidGains set_closed_loop_pid = 3;
   }
 }
 
@@ -11,4 +21,5 @@ message MotorDriverResponse {
   optional sint32 current = 2;
   optional sint32 encoder_position = 3;
   optional float encoder_velocity = 4;
+	uint32 status_flag = 5;
 }

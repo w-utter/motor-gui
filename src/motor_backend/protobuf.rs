@@ -13,11 +13,27 @@ pub struct MotorUiConfig {
     pub(crate) path: Option<String>,
     pub(crate) baud_rate: Option<BaudRate>,
     pub(crate) added: bool,
+    pub(crate) controller: ControllerState,
+    pub(crate) send_controller_config: bool,
+    kp_buf: String,
+    ki_buf: String,
+    kd_buf: String,
 }
 
 use crate::motor_ctx::{ControlState, MotorConfig};
 use std::sync::mpsc;
 use std::time;
+
+#[derive(Clone, Copy, Default, Debug)]
+pub enum ControllerState {
+    #[default]
+    OpenLoop,
+    ClosedLoop {
+        p: f32,
+        i: f32,
+        d: f32,
+    },
+}
 
 impl MotorUiConfig {
     pub(crate) fn display(&mut self, ui: &mut egui::Ui) -> bool {
@@ -28,6 +44,11 @@ impl MotorUiConfig {
             path,
             added: _,
             baud_rate,
+            controller,
+            send_controller_config,
+            ki_buf,
+            kp_buf,
+            kd_buf,
         } = self;
 
         ui.horizontal(|ui| {
@@ -62,9 +83,67 @@ impl MotorUiConfig {
             if let Some(rate) = &baud_rate {
                 ui.label(format!("set baud rate: {:?}", rate));
             }
+
+
+            if self.added {
+                ui.vertical(|ui| {
+                    if ui.add(egui::RadioButton::new(matches!(self.controller, ControllerState::OpenLoop), "open loop")).clicked() {
+                        self.controller = ControllerState::OpenLoop;
+                    }
+                    if ui.add(egui::RadioButton::new(matches!(self.controller, ControllerState::ClosedLoop{..}), "closed loop")).clicked() {
+                        self.controller = ControllerState::ClosedLoop {
+                            p: Self::parse_float(&self.kp_buf),
+                            i: Self::parse_float(&self.ki_buf),
+                            d: Self::parse_float(&self.kd_buf),
+                        }
+                    }
+
+                    if let ControllerState::ClosedLoop {
+                        p,
+                        i,
+                        d,
+                    } = &mut self.controller {
+                        ui.horizontal(|ui| {
+                            ui.label("p");
+                            if ui.text_edit_singleline(&mut self.kp_buf).changed() {
+                                *p = Self::parse_float(&self.kp_buf)
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("i");
+                            if ui.text_edit_singleline(&mut self.ki_buf).changed() {
+                                *p = Self::parse_float(&self.ki_buf)
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("d");
+                            if ui.text_edit_singleline(&mut self.kd_buf).changed() {
+                                *p = Self::parse_float(&self.kd_buf)
+                            }
+                        });
+                    }
+
+                    if ui.button("update controller").clicked() {
+                        self.send_controller_config = true;
+                    }
+                });
+
+                if matches!(self.controller, ControllerState::ClosedLoop {..}) {
+                    ui.label("");
+                    if ui.text_edit_singleline(path_buf_storage).changed() {
+                    }
+
+                }
+            }
         });
 
         changed
+    }
+
+    fn parse_float(buf: &str) -> f32 {
+        buf.parse::<f32>().ok().unwrap_or(0.)
     }
 
     pub fn path(&self) -> Option<&str> {
@@ -79,6 +158,11 @@ impl Default for MotorUiConfig {
             path: None,
             added: false,
             baud_rate: Default::default(),
+            controller: Default::default(),
+            send_controller_config: false,
+            ki_buf: Default::default(),
+            kp_buf: Default::default(),
+            kd_buf: Default::default(),
         }
     }
 }
@@ -88,6 +172,7 @@ pub enum ProtobufCmd {
     Add(MotorConfig, RawDevice),
     Remove,
     SetWaveForm(crate::MotorInput),
+    SetController(ControllerState),
     StopWaveform,
     Shutdown,
 }
@@ -114,6 +199,8 @@ pub fn event_loop(
 
     let mut probe = io_uring::register::Probe::new();
     ring.submitter().register_probe(&mut probe)?;
+
+    let mut change_controller = None;
 
     use io_uring::opcode::{ReadMulti, Write};
     use io_uring::types;
@@ -295,7 +382,7 @@ pub fn event_loop(
                         let _ = err_tx.send((path, ProtobufResponse::EndWaveform));
                     }
                 }
-
+                ProtobufCmd::SetController(c) => change_controller = Some(c),
                 _ => (),
             }
             /*
@@ -332,7 +419,65 @@ pub fn event_loop(
 
                 let buf = id.buffer();
 
+                if let Some(controller) = core::mem::take(&mut change_controller) {
+                    use motor::{MotorDriver, motor_driver::Motor_cmd, PidGains, Empty};
+                    let mut cmd = MotorDriver::new();
+                    cmd.motor_cmd = Some(match controller {
+                        ControllerState::OpenLoop => Motor_cmd::SetOpenLoop(Empty::new()),
+                        ControllerState::ClosedLoop{p, i, d} => Motor_cmd::SetClosedLoopPid({
+                            let mut gains = PidGains::new();
+                            gains.kp = p;
+                            gains.ki = i;
+                            gains.kd = d;
+                            gains
+                        }),
+                    });
+
+                    let buf = cmd.write_to_bytes().unwrap();
+
+                    let write_entry = Write::new(
+                        types::Fd(motor.backend_specific.dev.as_raw_fd()),
+                        buf.as_ptr(),
+                        buf.len() as _,
+                    )
+                    .build()
+                    .user_data(motor.backend_specific.dev.as_raw_fd() as _)
+                    .flags(io_uring::squeue::Flags::SKIP_SUCCESS);
+
+                    while unsafe { ring.submission().push(&write_entry).is_err() } {
+                        ring.submit().expect("could not submit ops");
+                    }
+
+                    ring.submit().expect("could not submit ops");
+                    continue;
+                }
+
+
                 let Ok(response) = motor::MotorDriverResponse::parse_from_bytes(buf) else {
+                    use motor::{MotorDriver, motor_driver::Motor_cmd};
+                    use protobuf::Message;
+
+                    let mut cmd = MotorDriver::new();
+                    cmd.motor_cmd = Some(Motor_cmd::Velocity(
+                        motor.input_cvp.unwrap_or_default().velocity.round() as _,
+                    ));
+
+                    let buf = cmd.write_to_bytes().unwrap();
+
+                    let write_entry = Write::new(
+                        types::Fd(motor.backend_specific.dev.as_raw_fd()),
+                        buf.as_ptr(),
+                        buf.len() as _,
+                    )
+                    .build()
+                    .user_data(motor.backend_specific.dev.as_raw_fd() as _)
+                    .flags(io_uring::squeue::Flags::SKIP_SUCCESS);
+
+                    while unsafe { ring.submission().push(&write_entry).is_err() } {
+                        ring.submit().expect("could not submit ops");
+                    }
+
+                    ring.submit().expect("could not submit ops");
                     continue;
                 };
                 drop(id);
@@ -346,6 +491,7 @@ pub fn event_loop(
                 motor.update_input(&err_tx, name);
 
                 if let Some(controller) = &mut motor.motor_config.controller {
+                    println!("sending controller to: {controller:?}");
                     let input = motor.input_cvp.unwrap_or_default();
 
                     let new_input = controller.update(input, cvp, &motor.motor_config.state);
